@@ -18,6 +18,7 @@
 #include <netinet/in.h>
 #include <set>
 #include <setjmp.h>
+#include <signal.h>
 #include <stack>
 #include <stdarg.h>
 #include <sys/inotify.h>
@@ -61,6 +62,9 @@ const char LISTEN_PATH[] = "/tmp/search.sock";
 const string PCAP_SUFFIX = ".cap";
 const string INDEX_SUFFIX = ".fm";
 const int SAMPLE_RATE = 32;
+const int AUTOCOMPLETE_LIMIT = 20;
+const int AUTOCOMPLETE_LENGTH = 20;
+const int CONTEXT_LENGTH = 30;
 
 ///// log
 
@@ -90,6 +94,33 @@ u32 clog2(u32 x)
 {
   return x > 1 ? 32-__builtin_clz(x-1) : 0;
 }
+
+string make_printable(const string &str)
+{
+  const char ab[] = "0123456789abcdef";
+  string ret;
+  for (char c: str)
+    if (isprint(c))
+      ret += c;
+    else {
+      ret += "\\x";
+      ret += ab[c&15];
+      ret += ab[c>>16&15];
+    }
+  return ret;
+}
+
+template<class Fwd>
+struct Reverser
+{
+  const Fwd &fwd_;
+  Reverser<Fwd>(const Fwd &fwd): fwd_(fwd) {}
+  auto begin() -> decltype(fwd_.rbegin()) const { return fwd_.rbegin(); }
+  auto end() -> decltype(fwd_.rend()) const  { return fwd_.rend(); }
+};
+
+template<class Fwd>
+Reverser<Fwd> make_reverse_iterator(const Fwd &fwd) { return Reverser<Fwd>(fwd); }
 
 ///// vector
 
@@ -1085,16 +1116,19 @@ public:
     return {l, h};
   }
   // m > 0
-  u32 count(u32 m, u8 *pattern) const {
+  u32 count(u32 m, const u8 *pattern) const {
     auto x = get_range(m, pattern);
     return x.second-x.first;
   }
-  vector<u32> locate(u32 m, const u8 *pattern, u32 limit, u32 &total) const {
+
+  u32 locate(u32 m, const u8 *pattern, bool autocomplete, u32 limit, u32 &skip, vector<u32> &res) const {
     auto x = get_range(m, pattern);
-    u32 l = x.first, h = x.second;
-    total = h-l;
-    vector<u32> ret;
-    for (; l < h && ret.size() < limit; l++) {
+    u32 l = x.first, h = x.second, total = h-l;
+    u32 delta = min(h-l, skip);
+    l += delta;
+    skip -= delta;
+    u32 step = autocomplete ? max((h-l)/limit, u32(1)) : 1;
+    for (; l < h && res.size() < limit; l += step) {
       u32 d = 0, i = l;
       while (! sampled_ef_.exist(i)) {
         int c = bwt_wm_[i + (i < initial_)];
@@ -1102,9 +1136,9 @@ public:
         d++;
       }
       u32 pos = ssa_[sampled_ef_.rank(i)] + d;
-      ret.push_back(pos);
+      res.push_back(pos);
     }
-    return ret;
+    return total;
   }
 
   template<typename Archive>
@@ -1309,10 +1343,10 @@ void output_error(bool use_err, const char *format, va_list ap)
   char text[BUF_SIZE], msg[BUF_SIZE], buf[BUF_SIZE];
   vsnprintf(msg, BUF_SIZE, format, ap);
   if (use_err)
-    snprintf(text, BUF_SIZE, " [%s %s]", 0 < errno && errno < MAX_ENAME ? ENAME[errno] : "?UNKNOWN?", strerror(errno));
+    snprintf(text, BUF_SIZE, "[%s %s] ", 0 < errno && errno < MAX_ENAME ? ENAME[errno] : "?UNKNOWN?", strerror(errno));
   else
-    strcpy(text, ":");
-  snprintf(buf, BUF_SIZE, RED "ERROR%s %s\n", text, msg);
+    strcpy(text, "");
+  snprintf(buf, BUF_SIZE, RED "%s%s\n", text, msg);
   fputs(buf, stderr);
   fputs(SGR0, stderr);
   fflush(stderr);
@@ -1323,7 +1357,7 @@ void err_msg(const char *format, ...)
   va_list ap;
   va_start(ap, format);
   int saved = errno;
-  output_error(true, format, ap);
+  output_error(errno > 0, format, ap);
   errno = saved;
   va_end(ap);
 }
@@ -1354,9 +1388,9 @@ jmp_buf jmpbuf;
 
 struct Entry
 {
-  int fd;
-  size_t size;
-  void *mmap;
+  int fd, index_fd;
+  int size, index_size;
+  void *mmap, *index_mmap;
   FMIndex *fm;
 };
 
@@ -1365,7 +1399,7 @@ bool is_pcap(const string &name)
   return name.size() >= PCAP_SUFFIX.size() && name.substr(name.size()-PCAP_SUFFIX.size()) == PCAP_SUFFIX;
 }
 
-void process_dir(const string &pcap_dir, bool do_inotify, int &inotify_fd, function<void(string, bool)> fn)
+void process_dir(const string &pcap_dir, bool do_inotify, int &inotify_fd, function<void(string)> fn)
 {
   if (do_inotify) {
     if ((inotify_fd = inotify_init()) < 0)
@@ -1380,12 +1414,12 @@ void process_dir(const string &pcap_dir, bool do_inotify, int &inotify_fd, funct
   while (readdir_r(dir, &dirent, &res) == 0 && res) {
     string name = dirent.d_name;
     if (is_pcap(name))
-      fn(name, false);
+      fn(name);
   }
   closedir(dir);
 }
 
-void process_inotify(const string &pcap_dir, int inotify_fd, set<string> &modified, function<void(string, bool)> add_fn, function<void(string)> rm_fn)
+void process_inotify(const string &pcap_dir, int inotify_fd, set<string> &modified, function<void(string)> add_fn, function<void(string)> rm_fn)
 {
   char buf[sizeof(inotify_event)+NAME_MAX+1];
   int nread;
@@ -1407,14 +1441,14 @@ void process_inotify(const string &pcap_dir, int inotify_fd, set<string> &modifi
         rm_fn(ev->name);
       } else if (ev->mask & IN_MOVED_TO) {
         log_event("MOVED_TO %s\n", ev->name);
-        add_fn(ev->name, true);
+        add_fn(ev->name);
       } else if (ev->mask & IN_MODIFY)
         modified.insert(ev->name);
       else if (ev->mask & IN_CLOSE_WRITE) {
         if (modified.count(ev->name)) {
           modified.erase(ev->name);
           log_event("MODIFY then CLOSE_WRITE %s\n", ev->name);
-          add_fn(ev->name, true);
+          add_fn(ev->name);
         }
       }
     }
@@ -1422,6 +1456,8 @@ void process_inotify(const string &pcap_dir, int inotify_fd, set<string> &modifi
 
 void server_mode(const string &pcap_dir, u32 limit)
 {
+  signal(SIGPIPE, SIG_IGN);
+
   int inotify_fd;
   map<string, Entry> name2entry;
 
@@ -1434,37 +1470,54 @@ void server_mode(const string &pcap_dir, u32 limit)
     }
   };
 
-  auto add_fn = [&](string name, bool) {
+  auto add_fn = [&](string name) {
     string index_name = name+INDEX_SUFFIX;
     Entry entry;
     entry.mmap = MAP_FAILED;
-    if ((entry.fd = open((pcap_dir+"/"+index_name).c_str(), O_RDONLY)) < 0)
+    entry.index_mmap = MAP_FAILED;
+    errno = 0;
+    if ((entry.fd = open((pcap_dir+"/"+name).c_str(), O_RDONLY)) < 0)
       goto quit;
-    if (off_t(entry.size = lseek(entry.fd, 0, SEEK_END)) < 0)
+    if ((entry.index_fd = open((pcap_dir+"/"+index_name).c_str(), O_RDONLY)) < 0) {
+      if (errno == ENOENT)
+        errno = 0;
+      goto quit;
+    }
+    if ((entry.size = lseek(entry.fd, 0, SEEK_END)) < 0)
+      goto quit;
+    if ((entry.index_size = lseek(entry.index_fd, 0, SEEK_END)) < 0)
       goto quit;
     if (entry.size > 0 && (entry.mmap = mmap(NULL, entry.size, PROT_READ, MAP_SHARED, entry.fd, 0)) == MAP_FAILED)
       goto quit;
+    if (entry.index_size > 0 && (entry.index_mmap = mmap(NULL, entry.index_size, PROT_READ, MAP_SHARED, entry.index_fd, 0)) == MAP_FAILED)
+      goto quit;
     rm_fn(name);
-    if (entry.size < 4)
-      err_exit(EX_DATAERR, "invalid index file");
-    if (memcmp(entry.mmap, MAGIC_GOOD, 4))
-      err_exit(EX_DATAERR, "incomplete index file: bad magic");
-    if (entry.size > 0) {
-      Deserializer ar((void*)((char*)entry.mmap+4));
+    if (entry.index_size < 4) {
+      err_msg("invalid index file %s", index_name.c_str());
+      goto quit;
+    }
+    if (memcmp(entry.index_mmap, MAGIC_GOOD, 4)) {
+      err_msg("incomplete index file %s: bad magic", index_name.c_str());
+      goto quit;
+    }
+    if (entry.index_size > 0) {
+      Deserializer ar((char*)entry.index_mmap+strlen(MAGIC_GOOD));
       entry.fm = new FMIndex;
       ar & *entry.fm;
       name2entry[name] = entry;
     }
     return;
 quit:
+    if (entry.index_mmap != MAP_FAILED)
+      munmap(entry.index_mmap, entry.size);
     if (entry.mmap != MAP_FAILED)
-      munmap(entry.mmap, entry.size);
+      munmap(entry.mmap, entry.index_size);
+    if (entry.index_fd >= 0)
+      close(entry.index_fd);
     if (entry.fd >= 0)
       close(entry.fd);
-    if (errno) {
-      err_msg("processing index file");
-      errno = 0;
-    }
+    if (errno)
+      err_msg("processing index file %s", index_name.c_str());
   };
 
   process_dir(pcap_dir, true, inotify_fd, add_fn);
@@ -1503,30 +1556,64 @@ quit:
     }
     if (FD_ISSET(clifd, &rfds)) {
       char buf[BUF_SIZE];
-      const char *p, *time_begin = buf, *time_end = nullptr;
+      const char *p, *search_type = buf, *file_begin = buf, *file_end = nullptr;
       int nread;
       if ((nread = recv(clifd, buf, sizeof buf - 1, MSG_WAITALL)) <= 0)
         err_exit(EX_OSERR, "recv");
       for (p = buf; p < buf+sizeof(buf) && *p; p++);
       if (++p >= buf+sizeof(buf))
         goto quit;
-      time_end = p;
+      file_begin = p;
+      for (; p < buf+sizeof(buf) && *p; p++);
+      if (++p >= buf+sizeof(buf))
+        goto quit;
+      file_end = p;
       for (; p < buf+sizeof(buf) && *p; p++);
       if (++p >= buf+sizeof(buf))
         goto quit;
 
       {
+        bool autocomplete = *search_type == '\0';
         u32 len = buf+nread-p, total = 0, t;
-        vector<u32> res;
-        for (auto &ne: name2entry) {
-          const string &name = ne.first;
-          Entry &entry = ne.second;
-          if ((! *time_begin || string(time_begin) <= name) && (! *time_end || name <= string(time_end)) && entry.size > 0) {
-            entry.fm->locate(len, (const u8 *)p, res.size() < limit ? limit-res.size() : 0, t);
-            total += t;
+        if (autocomplete) {
+          u32 skip = 0;
+          vector<u32> res;
+          vector<string> candidates;
+          for (auto &ne: make_reverse_iterator(name2entry)) {
+            const string &name = ne.first;
+            const Entry &entry = ne.second;
+            auto old_size = res.size();
+            entry.fm->locate(len, (const u8 *)p, true, AUTOCOMPLETE_LIMIT, skip, res);
+            FOR(i, old_size, res.size())
+              candidates.emplace_back((char*)entry.mmap+res[i], (char*)entry.mmap+min(entry.size, int(res[i])+AUTOCOMPLETE_LENGTH));
+            if (res.size() >= AUTOCOMPLETE_LIMIT) break;
+          }
+          sort(candidates.begin(), candidates.end());
+          candidates.erase(unique(candidates.begin(), candidates.end()), candidates.end());
+          for (auto &cand: candidates)
+            dprintf(clifd, "%s\n", make_printable(cand.c_str()).c_str()); // may SIGPIPE
+        } else {
+          char *end;
+          errno = 0;
+          u32 skip = strtol(search_type, &end, 0);
+          if (! *end && ! errno) {
+            vector<u32> res;
+            for (auto &ne: make_reverse_iterator(name2entry)) {
+              const string &name = ne.first;
+              const Entry &entry = ne.second;
+              if ((! *file_begin || string(file_begin) <= name) && (! *file_end || name <= string(file_end)) && entry.size > 0) {
+                auto old_size = res.size();
+                total += entry.fm->locate(len, (const u8 *)p, false, limit, skip, res);
+                FOR(i, old_size, res.size()) {
+                  dprintf(clifd, "%s\t%u\t%s\n", name.c_str(), res[i],
+                          make_printable(string((char*)entry.mmap+max(int(res[i])-CONTEXT_LENGTH, 0), (char*)entry.mmap+min(entry.size, int(res[i])+CONTEXT_LENGTH))).c_str());
+                }
+                if (res.size() >= AUTOCOMPLETE_LIMIT) break;
+              }
+            }
+            dprintf(clifd, "%u\n", total);
           }
         }
-        dprintf(clifd, "%u\n", total);
       }
 quit:
       close(clifd);
@@ -1539,16 +1626,25 @@ void index_mode(const string &pcap_dir, bool do_inotify)
 {
   int inotify_fd;
 
-  auto add_fn = [&](string name, bool overwrite) {
+  auto add_fn = [&](string name) {
     string index_name = name+INDEX_SUFFIX;
     int index_fd = -1, pcap_fd = -1;
     off_t pcap_size;
     void *pcap_content = MAP_FAILED;
     FILE *fh = NULL;
-    if ((index_fd = open((pcap_dir+"/"+index_name).c_str(), O_WRONLY | O_CREAT | (overwrite ? 0 : O_EXCL), 0666)) < 0) {
-      if (errno == EEXIST)
-        errno = 0; // ignore error
-      goto quit;
+    errno = 0;
+    if ((index_fd = open((pcap_dir+"/"+index_name).c_str(), O_RDWR | O_CREAT, 0666)) < 0) {
+      if (errno == EEXIST) {
+        char buf[4];
+        int nread;
+        if ((nread = read(index_fd, buf, 4)) < 0)
+          goto quit;
+        // skip good index file
+        if (nread == 4 && ! memcmp(buf, MAGIC_GOOD, 4))
+          goto quit;
+        // overwrite if bad
+      } else
+        goto quit;
     }
     if ((pcap_fd = open((pcap_dir+"/"+name).c_str(), O_RDONLY)) < 0)
       goto quit;
@@ -1583,10 +1679,8 @@ quit:
       munmap(pcap_content, pcap_size);
     if (pcap_fd >= 0)
       close(pcap_fd);
-    if (errno) {
+    if (errno)
       err_msg("failed to process pcap file %s", name.c_str());
-      errno = 0;
-    }
   };
 
   auto rm_fn = [&](string name) {
@@ -1710,7 +1804,7 @@ int main(int argc, char *argv[])
     case 'l': {
       char *end;
       errno = 0;
-      if ((limit = strtoul(optarg, &end, 0)) > UINT32_MAX)
+      if (errno)
         err_exit(EX_USAGE, "limit is too large");
       break;
     }
@@ -1727,10 +1821,10 @@ int main(int argc, char *argv[])
   const char *pcap_dir = argv[optind];
 
   if (is_index_mode) {
-    puts("index mode");
+    log_action("index mode\n");
     index_mode(pcap_dir, do_inotify);
   } else {
-    puts("server mode");
+    log_action("server mode\n");
     server_mode(pcap_dir, limit);
   }
 }
