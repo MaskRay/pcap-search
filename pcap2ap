@@ -29,7 +29,7 @@ process() {
       start=$(date +%s.%N)
       $dshell_defcon/dshell-decode -d stream2dump --stream2dump_outfiles=$PWD/$filename.ap $PWD/$filename >/dev/null
       stop=$(date +%s.%N)
-      log_action created .ap for $filename, used $(bc -l<<<"scale=3;($stop-$start)/1") s
+      log_action created .ap for $filename, size: $(stat -c %s $filename), used $(bc -l<<<"scale=3;($stop-$start)/1") s
     ) &
   fi
 }
