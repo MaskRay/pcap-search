@@ -22,7 +22,7 @@ SEARCH_TIMEOUT = 30
 MAX_PAGES = 30
 PER_PAGE = 20
 DSHELL_DEFCON = File.join __dir__, '..', 'dshell-defcon'
-PCAP_DIR = File.expand_path '/tmp/n'
+PCAP_DIR = File.expand_path '/tmp/s'
 
 # Main
 
@@ -59,17 +59,17 @@ get '/download' do
   query = Rack::Utils.parse_query request.query_string
   filename = query['filename']
   offset = query['offset']
-  format = query['format']
-  unless filename && format
+  type = query['type']
+  unless filename && type
     return 412
   end
-  case format
+  case type
   when 'all'
     send_file File.join(PCAP_DIR, filename)
   when 'pcap', 'str', 'hex', 'repr'
     return 412 unless offset
     temp_file = Tempfile.new filename
-    IO.popen [File.join(DSHELL_DEFCON, './offset2stream.py'), File.join(PCAP_DIR, "#{filename}.ap"), offset, format, File.join(PCAP_DIR, filename), temp_file.path] do |h|
+    IO.popen [File.join(DSHELL_DEFCON, './offset2stream.py'), File.join(PCAP_DIR, "#{filename}.ap"), offset, type, File.join(PCAP_DIR, filename), temp_file.path] do |h|
       h.read
     end
     Thread.new do
