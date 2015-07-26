@@ -31,7 +31,7 @@ configure :development do
 end
 
 set :static, true
-set :public_folder, __dir__
+set :public_folder, File.join(__dir__, "static")
 set :views, __dir__
 set :bind, '0'
 set :port, 4568
@@ -52,7 +52,7 @@ end
 
 
 get '/' do
-  send_file 'html/index.html'
+  send_file File.join(__dir__,'static','index.html')
 end
 
 get '/download' do
