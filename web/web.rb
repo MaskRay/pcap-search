@@ -50,13 +50,6 @@ before do
   response.headers['Access-Control-Allow-Origin'] = '*'
 end
 
-get '/css/*.css' do
-  sass params[:splat][0].to_sym
-end
-
-get '/js/*.js' do
-  coffee params[:splat][0].to_sym
-end
 
 get '/' do
   send_file 'html/index.html'
