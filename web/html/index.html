@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Search</title>
+  <style>
+  .hightlight{
+    color: #EF4836;
+    background: #F1A9A0;
+  }
+  .searchbox{
+    background-color: #22A7F0;
+    transition: padding-bottom 0.5s;
+    padding-bottom: 1em;
+    padding-top: 1em;
+    max-height: 100vh;
+  }
+  .input{
+    transition: font-size 0.5s;
+  }
+  .header{
+    color: white;
+    transition: font-size 0.5s, margin 0.5s;
+  }
+  .none .header{
+    margin: 4em 0 2em 0;
+    font-size: 4em;
+  }
+  .none .searchbox{
+    background-color: #1873A4;
+    padding-bottom: 100vh;
+  }
+  .none .input{
+    font-size: 2em !important;
+  }
+  code.code{
+    background-color: #FFEEEE;
+    display: inline;
+    word-wrap: pre;
+  }
+  .line-number{
+    font-weight: bold;
+    font-family: Monospace;
+    display: inline-block;
+    min-width: 8em;
+    text-margin:  right;
+  }
+  .keyword{
+    font-width: bold;
+    color: red;
+  }
+  </style>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/semantic-ui/2.0.7/semantic.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/2.1.4/jquery.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/semantic-ui/2.0.7/semantic.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/riot/2.2.2/riot+compiler.min.js"></script>
+  <script>
+  // set up seacher api
+  $.fn.api.settings.api = {
+    'search': "/api/autocomplete?q={query}"
+  }
+  </script>
+  <script type="riot/tag">
+    <search_bar>
+      <div class="searchbox">
+        <div class="ui one columns grid container searchbox">
+          <div class="ui column">
+            <h1 class="header">pcap Search</h1>
+            <div class="ui search">
+              <div class="ui icon fluid input">
+                <input type="text" class="prompt" placeholder="Search..." onfocus={small} onkeypress={submit}>
+                <i class=" search icon" onclick={submit_click}></i>
+              </div>
+              <div class="results">
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="ui one column grid container resultBox">
+        <div each={n, page in pages} class="ui column">
+          <h2 class="ui centered inverted header">
+            <div class="">Page {n}</div>
+          </h2>
+          <div each={file, packs in page} class="ui segments">
+            <div class="ui segment">
+              {file}
+            </div>
+            <div class="ui secondary segment">
+              <div class="ui divided list">
+                <div class="item" each={packs}>
+                  <div class="right floated content">
+                    <a class="ui button" href={download(file, null, 'all')} target="_blank">ALL</a>
+                    <a class="ui button" href={download(file, offset, 'pcap')} target="_blank">PCAP</a>
+                    <div class="ui button" onclick={open.bind(this, file, offset)}>View</div>
+                  </div>
+                  <div class="content">
+                    <span class="line-number">{offset}</span><code class="code"><span class={keyword: i[0]} each={i,j in find(context)}>{i[1]}</span></code>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      this.on('mount', function(){
+        // init the search
+        this.pages = {}
+        $('.ui.search').search({
+          cache: false,
+          maxResults: 100, // huge number
+          apiSettings: {
+            url:"/api/autocomplete?q={query}",
+            onResponse:function(response){
+              var ret = {
+                results: response.suggestions.map(function(x){
+                  return {title: x}
+                })
+              }
+              console.log(ret)
+              return ret
+            }
+          },
+          onSelect: function(e){
+            this.search(e.title)
+          }.bind(this)
+        })
+      })
+      download(file, offset, type){
+        return "/download?filename="+ encodeURIComponent(file) + "&type=" + encodeURIComponent(type) + (offset == undefined?"":"&offset=" + encodeURIComponent(offset));
+      }
+      small(){
+        $('body').removeClass('none')
+      }
+      show_complete(e){
+        var input_text = e.target.value;
+        console.log(input_text);
+        return true;
+      }
+      submit(e){
+        if(e.which == 13){
+          var keyword = e.target.value;
+          //hide the auto complete
+          $('.ui.search').search('hide results')
+          this.search(keyword)
+        }else{
+          return true
+        }
+      }
+      submit_click(e){
+        var keyword = e.target.parentNode.children[0].value;
+        // console.log(keyword)
+        this.search(keyword)
+        return true
+      }
+      search(keyword, page){
+        console.log(this.keyword, keyword)
+        if(this.keyword != keyword){
+          this.pages = {}
+          this.page = 0
+        }
+        var page = page == undefined ? 0 : page;
+        $.get('/api/search', {page: page, q:keyword},function(response){
+          // console.log(response.results);
+          this.pages[page] = response.results
+          this.keyword = keyword
+          this.page = page
+          this.update()
+          $('.ui.search').search('hide results')
+        }.bind(this), 'json')
+      }
+      next_page(){
+        if(!this.pages[this.page + 1]){
+          this.search(keyword, this.page + 1)
+        }
+      }
+      prev_page(){
+        if(!this.pages[this.page - 1] && this.page > 0){
+          this.search(keyword, this.page - 1)
+        }
+      }
+      find(text){
+        var ret = [];
+        text.split(this.keyword).forEach(function(x){
+          ret.push([0,x])
+          ret.push([1,this.keyword])
+        }.bind(this))
+        // console.log(ret)
+        return ret.slice(0, -1)
+      }
+    </search_bar>
+  </script>
+</head>
+<body class="none">
+  <search_bar></search_bar>
+  <script>
+  riot.mount("*");
+  </script>
+</body>
+</html>

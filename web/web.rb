@@ -59,7 +59,7 @@ get '/js/*.js' do
 end
 
 get '/' do
-  redirect '/search'
+  send_file 'index,html'
 end
 
 get '/download' do
