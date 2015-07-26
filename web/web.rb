@@ -65,6 +65,8 @@ get '/download' do
   end
   case type
   when 'all'
+    content_type 'application/vnd.tcpdump.pcap'
+    attachment filename
     send_file File.join(PCAP_DIR, filename)
   when 'pcap', 'str', 'hex', 'repr'
     return 412 unless offset
@@ -134,7 +136,7 @@ get '/api/search' do
 
       res = lines[0..-2].map {|line|
         filename, offset, context = line.chomp.split "\t"
-        {filename: filename, offset: offset, context: context}
+        {filename: filename.sub(/\.ap$/, ''), offset: offset, context: context}
       }
       res_grouped = Hash.new {|h,k| h[k] = [] }
       res.each {|x|
