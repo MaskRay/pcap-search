@@ -59,7 +59,7 @@ get '/js/*.js' do
 end
 
 get '/' do
-  send_file 'index,html'
+  send_file 'html/index.html'
 end
 
 get '/download' do
