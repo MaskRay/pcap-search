@@ -1,4 +1,4 @@
-CXXFLAGS += -g3 -march=native -std=c++11 -Wno-deprecated-declarations
+CXXFLAGS += -g3 -march=native -std=c++11 -Wno-deprecated-declarations -pthread
 #CXXFLAGS += -fsanitize=address
 #CXXFLAGS += -fno-default-inline
 #CXXFLAGS += -O3

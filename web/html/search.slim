@@ -1,0 +1,46 @@
+doctype 5
+html
+  head
+    meta lang='utf-8'
+    link rel='stylesheet' href='/bower_components/semantic-ui/dist/semantic.min.css'
+    link rel='stylesheet' href='/css/style.css'
+  body
+    .ui.inverted.page.grid.masthead.segment
+      .column
+        form.form.segment.main-form
+          .inline.field.ui.left.icon.action.input style='margin-left:1em;'
+            i.icon.search
+            input#q type='text' name='q' value=q
+          button.ui.blue.submit.button Go
+
+    .ui.page.grid
+      .column.pagination-wrap
+        - if pages > 1
+          - l = [page-15, 0].max
+          - h = [page+15, pages].min
+          .ui.pagination.menu
+            - if l > 0
+              a.icon.item href="/search?q=#{CGI.escape q}&page=#{0}"
+                i.left.icon.arrow
+            - (l...h).each do |p|
+              a.item class=(p == page ? 'active' : '') href="/search?q=#{CGI.escape q}&page=#{p}" = p
+            - if h < pages
+              a.icon.item href="/search?q=#{CGI.escape q}&page=#{h-1}"
+                i.right.icon.arrow
+    .ui.page.grid
+      .sixteen.wide.column
+        .ui.feed
+          - result.each do |r|
+              .event
+                .content
+                  .summary
+                    a.title href="http://#{r[:uri]}" target='_blank'
+                      = r[:filename]
+                      '
+                      = r[:offset]
+                    code== r[:context]
+
+    script src='/bower_components/jquery/jquery.min.js'
+    script src='/bower_components/devbridge-autocomplete/dist/jquery.autocomplete.min.js'
+    script src='/bower_components/semantic-ui/dist/semantic.min.js'
+    script src='/js/search.js'

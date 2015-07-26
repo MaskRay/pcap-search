@@ -1,0 +1,15 @@
+{
+  "name": "pcap-search",
+  "version": "0.0.1",
+  "private": "true",
+  "dependencies": {
+    "jquery": "~2.1.4",
+    "devbridge-autocomplete": "~1.2.21",
+    "semantic-ui": "~2.0.7"
+  },
+  "exportsOverride": {
+    "jquery": {
+      "js": "jquery.min.js"
+    }
+  }
+}

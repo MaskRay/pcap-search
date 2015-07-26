@@ -4,8 +4,10 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cassert>
+#include <cctype>
 #include <climits>
 #include <cstdint>
+#include <memory>
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
@@ -16,6 +18,7 @@
 #include <getopt.h>
 #include <map>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <set>
 #include <setjmp.h>
 #include <signal.h>
@@ -25,6 +28,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <sysexits.h>
 #include <type_traits>
@@ -62,19 +66,35 @@ const char LISTEN_PATH[] = "/tmp/search.sock";
 const string PCAP_SUFFIX = ".cap";
 const string INDEX_SUFFIX = ".fm";
 const int SAMPLE_RATE = 32;
+const int SEARCH_LIMIT = 20;
 const int AUTOCOMPLETE_LIMIT = 20;
 const int AUTOCOMPLETE_LENGTH = 20;
 const int CONTEXT_LENGTH = 30;
+const long REQUEST_TIMEOUT_MILLI = 1000;
 
 ///// log
+
+void log_generic(const char *prefix, const char *format, va_list ap)
+{
+  char buf[BUF_SIZE];
+  timeval tv;
+  tm tm;
+  gettimeofday(&tv, NULL);
+  fputs(prefix, stdout);
+  if (localtime_r(&tv.tv_sec, &tm)) {
+    strftime(buf, sizeof buf, "%T.%%06u ", &tm);
+    printf(buf, tv.tv_usec);
+  }
+  vprintf(format, ap);
+  fputs(SGR0, stdout);
+  fflush(stdout);
+}
 
 void log_event(const char *format, ...)
 {
   va_list ap;
   va_start(ap, format);
-  printf(CYAN);
-  vprintf(format, ap);
-  printf(SGR0);
+  log_generic(CYAN, format, ap);
   va_end(ap);
 }
 
@@ -82,11 +102,29 @@ void log_action(const char *format, ...)
 {
   va_list ap;
   va_start(ap, format);
-  printf(GREEN);
-  vprintf(format, ap);
-  printf(SGR0);
+  log_generic(GREEN, format, ap);
   va_end(ap);
 }
+
+void log_status(const char *format, ...)
+{
+  va_list ap;
+  va_start(ap, format);
+  log_generic(YELLOW, format, ap);
+  va_end(ap);
+}
+
+class StopWatch
+{
+  timeval start_;
+public:
+  StopWatch() { gettimeofday(&start_, NULL); }
+  double elapsed() {
+    timeval now;
+    gettimeofday(&now, NULL);
+    return (now.tv_sec-start_.tv_sec)+(now.tv_usec-start_.tv_usec)*1e-6;
+  }
+};
 
 ///// common
 
@@ -95,7 +133,7 @@ u32 clog2(u32 x)
   return x > 1 ? 32-__builtin_clz(x-1) : 0;
 }
 
-string make_printable(const string &str)
+string escape(const string &str)
 {
   const char ab[] = "0123456789abcdef";
   string ret;
@@ -104,9 +142,49 @@ string make_printable(const string &str)
       ret += c;
     else {
       ret += "\\x";
+      ret += ab[c>>4&15];
       ret += ab[c&15];
-      ret += ab[c>>16&15];
     }
+  return ret;
+}
+
+string unescape(size_t n, const char *str)
+{
+  auto from_hex = [&](int c) {
+    if ('0' <= c && c <= '9') return c-'0';
+    if ('a' <= c && c <= 'f') return c-'a'+10;
+    if ('A' <= c && c <= 'F') return c-'A'+10;
+    return 0;
+  };
+  string ret;
+  for (size_t i = 0; i < n; ) {
+    if (str[i] == '\\') {
+      if (i+4 <= n && str[i+1] == 'x') {
+        ret += char(from_hex(str[i+2])*16+from_hex(str[i+3]));
+        i += 4;
+        continue;
+      }
+      if (i+1 <= n)
+        switch (str[i+1]) {
+        case 'a': ret += '\a'; i += 2; continue;
+        case 'b': ret += '\b'; i += 2; continue;
+        case 't': ret += '\t'; i += 2; continue;
+        case 'n': ret += '\n'; i += 2; continue;
+        case 'v': ret += '\v'; i += 2; continue;
+        case 'f': ret += '\f'; i += 2; continue;
+        case 'r': ret += '\r'; i += 2; continue;
+        }
+      int j = i+1, v = 0;
+      for (; j < n && j < i+4 && unsigned(str[j]-'0') < 8; j++)
+        v = v*8+str[j]-'0';
+      if (i+1 < j) {
+        ret += char(v);
+        i = j;
+        continue;
+      }
+    }
+    ret += str[i++];
+  }
   return ret;
 }
 
@@ -1117,13 +1195,22 @@ public:
   }
   // m > 0
   u32 count(u32 m, const u8 *pattern) const {
+    if (! m) return n_;
     auto x = get_range(m, pattern);
     return x.second-x.first;
   }
 
   u32 locate(u32 m, const u8 *pattern, bool autocomplete, u32 limit, u32 &skip, vector<u32> &res) const {
-    auto x = get_range(m, pattern);
-    u32 l = x.first, h = x.second, total = h-l;
+    u32 l, h, total;
+    if (m) {
+      auto x = get_range(m, pattern);
+      l = x.first;
+      h = x.second;
+    } else {
+      l = 0;
+      h = n_;
+    }
+    total = h-l;
     u32 delta = min(h-l, skip);
     l += delta;
     skip -= delta;
@@ -1388,6 +1475,7 @@ jmp_buf jmpbuf;
 
 struct Entry
 {
+  bool valid;
   int fd, index_fd;
   int size, index_size;
   void *mmap, *index_mmap;
@@ -1454,73 +1542,183 @@ void process_inotify(const string &pcap_dir, int inotify_fd, set<string> &modifi
     }
 }
 
-void server_mode(const string &pcap_dir, u32 limit)
+struct Worker
+{
+  int clifd;
+  map<string, shared_ptr<Entry>> name2entry;
+  u32 search_limit;
+};
+
+//void *serve_client(int clifd, const map<string, Entry> *name2entry, u32 search_limit)
+void *serve_client(Worker *data)
+//int clifd, const map<string, Entry> *name2entry, u32 search_limit)
+{
+  char buf[BUF_SIZE];
+  const char *p, *search_type = buf, *file_begin = buf, *file_end = nullptr;
+  int nread = 0;
+  timeval timeout;
+  timeout.tv_sec = REQUEST_TIMEOUT_MILLI/1000;
+  timeout.tv_usec = REQUEST_TIMEOUT_MILLI%1000*1000;
+
+  for(;;) {
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(data->clifd, &rfds);
+    int res = select(data->clifd+1, &rfds, NULL, NULL, &timeout); // Linux modifies timeout
+    if (res < 0) {
+      if (errno == EINTR) continue;
+      goto quit;
+    }
+    if (! res) // timeout
+      goto quit;
+    int t = read(data->clifd, buf+nread, sizeof buf-nread);
+    if (t < 0) goto quit;
+    if (! t) break;
+    nread += t;
+  }
+
+  for (p = buf; p < buf+sizeof(buf) && *p; p++);
+  if (++p >= buf+sizeof(buf))
+    goto quit;
+  file_begin = p;
+  for (; p < buf+sizeof(buf) && *p; p++);
+  if (++p >= buf+sizeof(buf))
+    goto quit;
+  file_end = p;
+  for (; p < buf+sizeof(buf) && *p; p++);
+  if (++p >= buf+sizeof(buf))
+    goto quit;
+
+  {
+    bool autocomplete = *search_type == '\0';
+    u32 len = buf+nread-p, total = 0, t;
+    if (autocomplete) {
+      u32 skip = 0;
+      vector<u32> res;
+      vector<string> candidates;
+      for (auto &ne: make_reverse_iterator(data->name2entry)) {
+        const string &name = ne.first;
+        auto entry = ne.second;
+        if (entry->valid && entry->size > 0) {
+          auto old_size = res.size();
+          string pattern = unescape(len, p);
+          entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), true, AUTOCOMPLETE_LIMIT, skip, res);
+          FOR(i, old_size, res.size())
+            candidates.emplace_back((char*)entry->mmap+res[i], (char*)entry->mmap+min(entry->size, int(res[i])+AUTOCOMPLETE_LENGTH));
+          if (res.size() >= AUTOCOMPLETE_LIMIT) break;
+        }
+      }
+      sort(candidates.begin(), candidates.end());
+      candidates.erase(unique(candidates.begin(), candidates.end()), candidates.end());
+      for (auto &cand: candidates)
+        dprintf(data->clifd, "%s\n", escape(cand.c_str()).c_str()); // may SIGPIPE
+    } else {
+      char *end;
+      errno = 0;
+      u32 skip = strtol(search_type, &end, 0);
+      if (! *end && ! errno) {
+        vector<u32> res;
+        for (auto &ne: make_reverse_iterator(data->name2entry)) {
+          const string &name = ne.first;
+          auto entry = ne.second;
+          if (entry->valid && (! *file_begin || string(file_begin) <= name) && (! *file_end || name <= string(file_end)) && entry->size > 0) {
+            auto old_size = res.size();
+            string pattern = unescape(len, p);
+            total += entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), false, data->search_limit, skip, res);
+            FOR(i, old_size, res.size()) {
+              dprintf(data->clifd, "%s\t%u\t%s\n", name.c_str(), res[i],
+                      escape(string((char*)entry->mmap+max(int(res[i])-CONTEXT_LENGTH, 0), (char*)entry->mmap+min(entry->size, int(res[i])+CONTEXT_LENGTH))).c_str());
+            }
+            if (res.size() >= AUTOCOMPLETE_LIMIT) break;
+          }
+        }
+        dprintf(data->clifd, "%u\n", total);
+      }
+    }
+  }
+quit:
+  close(data->clifd);
+  free(data);
+  return NULL;
+}
+
+void server_mode(const string &pcap_dir, u32 search_limit)
 {
   signal(SIGPIPE, SIG_IGN);
 
   int inotify_fd;
-  map<string, Entry> name2entry;
+  map<string, shared_ptr<Entry>> name2entry;
 
   auto rm_fn = [&](string name) {
     if (name2entry.count(name)) { // already exists
-      Entry &old = name2entry[name];
-      delete old.fm;
-      munmap(old.mmap, old.size);
-      close(old.fd);
+      auto old = name2entry[name];
+      old->valid = false;
+      delete old->fm;
+      munmap(old->mmap, old->size);
+      munmap(old->index_mmap, old->index_size);
+      close(old->fd);
+      close(old->index_fd);
     }
   };
 
   auto add_fn = [&](string name) {
     string index_name = name+INDEX_SUFFIX;
-    Entry entry;
-    entry.mmap = MAP_FAILED;
-    entry.index_mmap = MAP_FAILED;
+    auto entry = make_shared<Entry>();
+    entry->valid = true;
+    entry->mmap = MAP_FAILED;
+    entry->index_mmap = MAP_FAILED;
     errno = 0;
-    if ((entry.fd = open((pcap_dir+"/"+name).c_str(), O_RDONLY)) < 0)
+    if ((entry->fd = open((pcap_dir+"/"+name).c_str(), O_RDONLY)) < 0)
       goto quit;
-    if ((entry.index_fd = open((pcap_dir+"/"+index_name).c_str(), O_RDONLY)) < 0) {
+    if ((entry->index_fd = open((pcap_dir+"/"+index_name).c_str(), O_RDONLY)) < 0) {
       if (errno == ENOENT)
         errno = 0;
       goto quit;
     }
-    if ((entry.size = lseek(entry.fd, 0, SEEK_END)) < 0)
+    if ((entry->size = lseek(entry->fd, 0, SEEK_END)) < 0)
       goto quit;
-    if ((entry.index_size = lseek(entry.index_fd, 0, SEEK_END)) < 0)
+    if ((entry->index_size = lseek(entry->index_fd, 0, SEEK_END)) < 0)
       goto quit;
-    if (entry.size > 0 && (entry.mmap = mmap(NULL, entry.size, PROT_READ, MAP_SHARED, entry.fd, 0)) == MAP_FAILED)
+    if (entry->size > 0 && (entry->mmap = mmap(NULL, entry->size, PROT_READ, MAP_SHARED, entry->fd, 0)) == MAP_FAILED)
       goto quit;
-    if (entry.index_size > 0 && (entry.index_mmap = mmap(NULL, entry.index_size, PROT_READ, MAP_SHARED, entry.index_fd, 0)) == MAP_FAILED)
+    if (entry->index_size > 0 && (entry->index_mmap = mmap(NULL, entry->index_size, PROT_READ, MAP_SHARED, entry->index_fd, 0)) == MAP_FAILED)
       goto quit;
     rm_fn(name);
-    if (entry.index_size < 4) {
-      err_msg("invalid index file %s", index_name.c_str());
+    if (entry->index_size < 8) {
+      log_status("invalid index file %s\n", index_name.c_str());
       goto quit;
     }
-    if (memcmp(entry.index_mmap, MAGIC_GOOD, 4)) {
-      err_msg("incomplete index file %s: bad magic", index_name.c_str());
+    if (memcmp(entry->index_mmap, MAGIC_GOOD, 4)) {
+      log_status("index file %s: bad magic\n", index_name.c_str());
       goto quit;
     }
-    if (entry.index_size > 0) {
-      Deserializer ar((char*)entry.index_mmap+strlen(MAGIC_GOOD));
-      entry.fm = new FMIndex;
-      ar & *entry.fm;
+    if (*((int*)entry->index_mmap+1) != entry->size) {
+      log_status("index file %s: wrong length\n", index_name.c_str());
+      goto quit;
+    }
+    if (entry->index_size > 0) {
+      Deserializer ar((char*)entry->index_mmap+strlen(MAGIC_GOOD)+4);
+      entry->fm = new FMIndex;
+      ar & *entry->fm;
       name2entry[name] = entry;
+      log_action("loaded index for %s\n", name.c_str());
     }
     return;
 quit:
-    if (entry.index_mmap != MAP_FAILED)
-      munmap(entry.index_mmap, entry.size);
-    if (entry.mmap != MAP_FAILED)
-      munmap(entry.mmap, entry.index_size);
-    if (entry.index_fd >= 0)
-      close(entry.index_fd);
-    if (entry.fd >= 0)
-      close(entry.fd);
+    if (entry->index_mmap != MAP_FAILED)
+      munmap(entry->index_mmap, entry->size);
+    if (entry->mmap != MAP_FAILED)
+      munmap(entry->mmap, entry->index_size);
+    if (entry->index_fd >= 0)
+      close(entry->index_fd);
+    if (entry->fd >= 0)
+      close(entry->fd);
     if (errno)
       err_msg("processing index file %s", index_name.c_str());
   };
 
   process_dir(pcap_dir, true, inotify_fd, add_fn);
+  log_status("start inotify\n");
 
   int sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (sockfd < 0)
@@ -1535,89 +1733,33 @@ quit:
     err_exit(EX_OSERR, "listen");
 
   set<string> modified;
-  int clifd = -1;
   for(;;) {
     fd_set rfds;
     FD_ZERO(&rfds);
     FD_SET(inotify_fd, &rfds);
-    FD_SET(clifd >= 0 ? clifd : sockfd, &rfds);
-    int res = select(max(clifd >= 0 ? clifd : sockfd, inotify_fd)+1, &rfds, NULL, NULL, NULL);
+    FD_SET(sockfd, &rfds);
+    int res = select(max(sockfd, inotify_fd)+1, &rfds, NULL, NULL, NULL);
     if (res < 0) {
       if (errno == EINTR) continue;
       err_exit(EX_OSERR, "select");
     }
-
     if (FD_ISSET(inotify_fd, &rfds))
       process_inotify(pcap_dir, inotify_fd, modified, add_fn, rm_fn);
     if (FD_ISSET(sockfd, &rfds)) {
-      clifd = accept(sockfd, NULL, NULL);
+      int clifd = accept(sockfd, NULL, NULL);
       if (clifd < 0)
         err_exit(EX_OSERR, "accept");
-    }
-    if (FD_ISSET(clifd, &rfds)) {
-      char buf[BUF_SIZE];
-      const char *p, *search_type = buf, *file_begin = buf, *file_end = nullptr;
-      int nread;
-      if ((nread = recv(clifd, buf, sizeof buf - 1, MSG_WAITALL)) <= 0)
-        err_exit(EX_OSERR, "recv");
-      for (p = buf; p < buf+sizeof(buf) && *p; p++);
-      if (++p >= buf+sizeof(buf))
-        goto quit;
-      file_begin = p;
-      for (; p < buf+sizeof(buf) && *p; p++);
-      if (++p >= buf+sizeof(buf))
-        goto quit;
-      file_end = p;
-      for (; p < buf+sizeof(buf) && *p; p++);
-      if (++p >= buf+sizeof(buf))
-        goto quit;
-
-      {
-        bool autocomplete = *search_type == '\0';
-        u32 len = buf+nread-p, total = 0, t;
-        if (autocomplete) {
-          u32 skip = 0;
-          vector<u32> res;
-          vector<string> candidates;
-          for (auto &ne: make_reverse_iterator(name2entry)) {
-            const string &name = ne.first;
-            const Entry &entry = ne.second;
-            auto old_size = res.size();
-            entry.fm->locate(len, (const u8 *)p, true, AUTOCOMPLETE_LIMIT, skip, res);
-            FOR(i, old_size, res.size())
-              candidates.emplace_back((char*)entry.mmap+res[i], (char*)entry.mmap+min(entry.size, int(res[i])+AUTOCOMPLETE_LENGTH));
-            if (res.size() >= AUTOCOMPLETE_LIMIT) break;
-          }
-          sort(candidates.begin(), candidates.end());
-          candidates.erase(unique(candidates.begin(), candidates.end()), candidates.end());
-          for (auto &cand: candidates)
-            dprintf(clifd, "%s\n", make_printable(cand.c_str()).c_str()); // may SIGPIPE
-        } else {
-          char *end;
-          errno = 0;
-          u32 skip = strtol(search_type, &end, 0);
-          if (! *end && ! errno) {
-            vector<u32> res;
-            for (auto &ne: make_reverse_iterator(name2entry)) {
-              const string &name = ne.first;
-              const Entry &entry = ne.second;
-              if ((! *file_begin || string(file_begin) <= name) && (! *file_end || name <= string(file_end)) && entry.size > 0) {
-                auto old_size = res.size();
-                total += entry.fm->locate(len, (const u8 *)p, false, limit, skip, res);
-                FOR(i, old_size, res.size()) {
-                  dprintf(clifd, "%s\t%u\t%s\n", name.c_str(), res[i],
-                          make_printable(string((char*)entry.mmap+max(int(res[i])-CONTEXT_LENGTH, 0), (char*)entry.mmap+min(entry.size, int(res[i])+CONTEXT_LENGTH))).c_str());
-                }
-                if (res.size() >= AUTOCOMPLETE_LIMIT) break;
-              }
-            }
-            dprintf(clifd, "%u\n", total);
-          }
-        }
-      }
-quit:
-      close(clifd);
-      clifd = -1;
+      pthread_t tid;
+      pthread_attr_t attr;
+      pthread_attr_init(&attr);
+      if (pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED))
+        err_exit(EX_OSERR, "pthread_attr_setdetachstate");
+      auto worker = new Worker;
+      worker->clifd = clifd;
+      worker->name2entry = name2entry; // make a copy of name2entry to prevent race condition
+      worker->search_limit = search_limit;
+      pthread_create(&tid, &attr, (void*(*)(void*))serve_client, worker);
+      pthread_attr_destroy(&attr);
     }
   }
 }
@@ -1633,42 +1775,53 @@ void index_mode(const string &pcap_dir, bool do_inotify)
     void *pcap_content = MAP_FAILED;
     FILE *fh = NULL;
     errno = 0;
-    if ((index_fd = open((pcap_dir+"/"+index_name).c_str(), O_RDWR | O_CREAT, 0666)) < 0) {
-      if (errno == EEXIST) {
-        char buf[4];
-        int nread;
-        if ((nread = read(index_fd, buf, 4)) < 0)
-          goto quit;
-        // skip good index file
-        if (nread == 4 && ! memcmp(buf, MAGIC_GOOD, 4))
-          goto quit;
-        // overwrite if bad
-      } else
-        goto quit;
-    }
     if ((pcap_fd = open((pcap_dir+"/"+name).c_str(), O_RDONLY)) < 0)
       goto quit;
     if ((pcap_size = lseek(pcap_fd, 0, SEEK_END)) < 0)
       goto quit;
+    if ((index_fd = open((pcap_dir+"/"+index_name).c_str(), O_RDWR | O_CREAT, 0666)) < 0)
+      goto quit;
+    {
+      char buf[8];
+      int nread;
+      if ((nread = read(index_fd, buf, 8)) < 0)
+        goto quit;
+      // skip good index file
+      if (nread == 0)
+       ;
+      else if (nread < 4 || memcmp(buf, MAGIC_GOOD, 4))
+        log_status("index file %s: bad magic. rebuilding\n", index_name.c_str());
+      else if (nread < 8 || *((int*)buf+1) != pcap_size)
+        log_status("index file %s: wrong length. rebuilding\n", index_name.c_str());
+      else
+        goto quit;
+    }
     if (pcap_size > 0 && (pcap_content = mmap(NULL, pcap_size, PROT_READ, MAP_SHARED, pcap_fd, 0)) == MAP_FAILED)
       goto quit;
     if (! (fh = fdopen(index_fd, "w")))
       goto quit;
     if (pcap_size > 0) {
+      StopWatch sw;
+      if (fseek(fh, 0, SEEK_SET) < 0)
+        err_exit(EX_IOERR, "fseek");
       if (fputs(MAGIC_BAD, fh) < 0)
+        err_exit(EX_IOERR, "fputs");
+      if (fputs(MAGIC_BAD, fh) < 0) // length of PCAP
         err_exit(EX_IOERR, "fputs");
       Serializer ar(fh);
       FMIndex fm;
       fm.init(pcap_size, (const u8 *)pcap_content, SAMPLE_RATE);
       ar & fm;
-      ftruncate(index_fd, ftell(fh));
+      long index_size = ftell(fh);
+      ftruncate(index_fd, index_size);
       fseek(fh, 0, SEEK_SET);
       fputs(MAGIC_GOOD, fh);
+      fwrite(&pcap_size, 4, 1, fh);
       if (ferror(fh)) {
         unlink((pcap_dir+"/"+index_name).c_str());
         err_exit(EX_IOERR, "failed to process pcap file %s", name.c_str());
       }
-      log_action("created index for %s\n", name.c_str());
+      log_action("created index for %s. PCAP: %ld, index: %ld, used %.3lf s\n", name.c_str(), pcap_size, index_size, sw.elapsed());
     }
 quit:
     if (fh)
@@ -1686,13 +1839,14 @@ quit:
   auto rm_fn = [&](string name) {
     string path = pcap_dir+"/"+name+INDEX_SUFFIX;
     unlink(path.c_str());
-    printf("unlinked %s\n", path.c_str());
+    log_action("unlinked %s\n", path.c_str());
   };
 
   process_dir(pcap_dir, do_inotify, inotify_fd, add_fn);
 
   set<string> modified;
   if (do_inotify) {
+    log_status("start inotify\n");
     fd_set rfds;
     for(;;) {
       FD_ZERO(&rfds);
@@ -1782,7 +1936,7 @@ int main(int argc, char *argv[])
 
   bool is_index_mode = false;
   bool do_inotify = true;
-  u32 limit = 100;
+  u32 search_limit = SEARCH_LIMIT;
 
   int opt;
   static struct option long_options[] = {
@@ -1804,8 +1958,12 @@ int main(int argc, char *argv[])
     case 'l': {
       char *end;
       errno = 0;
+      long t = strtol(optarg, &end, 0);
       if (errno)
         err_exit(EX_USAGE, "limit is too large");
+      if (*end || t < 0 || t > UINT32_MAX)
+        err_exit(EX_USAGE, "invalid limit");
+      search_limit = t;
       break;
     }
     case 'o':
@@ -1821,10 +1979,10 @@ int main(int argc, char *argv[])
   const char *pcap_dir = argv[optind];
 
   if (is_index_mode) {
-    log_action("index mode\n");
+    log_status("index mode\n");
     index_mode(pcap_dir, do_inotify);
   } else {
-    log_action("server mode\n");
-    server_mode(pcap_dir, limit);
+    log_status("server mode\n");
+    server_mode(pcap_dir, search_limit);
   }
 }
