@@ -1,5 +1,3 @@
-.*
-!.gitignore
 bower_components
 node_modules
 /indexer

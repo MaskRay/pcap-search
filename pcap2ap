@@ -1,0 +1,60 @@
+#!/bin/zsh
+set -e -u
+setopt nullglob
+
+dshell_defcon=$(dirname $0)/dshell-defcon
+
+usage() {
+  cat <<e
+Usage: ${0##*/} dir
+Transform .cap files into .ap files
+e
+  exit
+}
+
+log_generic() {
+  fmt=$1
+  print -- "$(date +%T.%N) $fmt" "${@:2}"
+}
+log_error() { tput setaf 1; log_generic "$@"; tput sgr0 }
+log_action() { tput setaf 2; log_generic "$@"; tput sgr0 }
+log_status() { tput setaf 3; log_generic "$@"; tput sgr0 }
+log_event() { tput setaf 6; log_generic "$@"; tput sgr0 }
+
+process() {
+  filename=$1
+  if [[ $filename =~ '\.cap$' ]]; then
+    log_status found $filename
+    (
+      start=$(date +%s.%N)
+      $dshell_defcon/dshell-decode -d stream2dump --stream2dump_outfiles=$PWD/$filename.ap $PWD/$filename >/dev/null
+      stop=$(date +%s.%N)
+      log_action created .ap for $filename, used $(bc -l<<<"scale=3;($stop-$start)/1") s
+    ) &
+  fi
+}
+
+while getopts h opt; do
+  case $opt; in
+    h) usage;;
+    \?) exit;;
+  esac
+done
+
+dir=${1:-}
+if [[ -z $dir ]]; then
+  usage
+fi
+cd $dir
+
+log_status processing $dir
+
+for i in *.cap; do
+  [[ -e $i.ap && ! -z $i.ap ]] || process $i
+done
+
+log_status start inotify
+
+inotifywait -mrqe CLOSE_WRITE --format %f . | while read filename; do
+  process $filename
+done
