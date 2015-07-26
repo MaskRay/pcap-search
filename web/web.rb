@@ -1,8 +1,9 @@
 #!/usr/bin/env ruby
 
-require 'timeout'
 require 'json'
 require 'socket'
+require 'tempfile'
+require 'timeout'
 begin
   require 'tilt'
   require 'sass'
@@ -17,9 +18,11 @@ rescue LoadError => e
 end
 
 SEARCH_SOCK = '/tmp/search.sock'
-SEARCH_TIMEOUT = 10
+SEARCH_TIMEOUT = 30
 MAX_PAGES = 30
 PER_PAGE = 20
+DSHELL_DEFCON = File.join __dir__, '..', 'dshell-defcon'
+PCAP_DIR = File.expand_path '/tmp/n'
 
 # Main
 
@@ -28,8 +31,8 @@ configure :development do
 end
 
 set :static, true
-set :public_folder, File.dirname(__FILE__)
-set :views, File.dirname(__FILE__)
+set :public_folder, __dir__
+set :views, __dir__
 set :bind, '0'
 set :port, 4568
 
@@ -43,7 +46,9 @@ helpers do
   end
 end
 
-## Routes
+before do
+  response.headers['Access-Control-Allow-Origin'] = '*'
+end
 
 get '/css/*.css' do
   sass params[:splat][0].to_sym
@@ -54,13 +59,42 @@ get '/js/*.js' do
 end
 
 get '/' do
-  slim :index
+  redirect '/search'
+end
+
+get '/download' do
+  query = Rack::Utils.parse_query request.query_string
+  filename = query['filename']
+  offset = query['offset']
+  format = query['format']
+  unless filename && format
+    return 412
+  end
+  case format
+  when 'all'
+    send_file File.join(PCAP_DIR, filename)
+  when 'pcap', 'str', 'hex', 'repr'
+    return 412 unless offset
+    temp_file = Tempfile.new filename
+    IO.popen [File.join(DSHELL_DEFCON, './offset2stream.py'), File.join(PCAP_DIR, "#{filename}.ap"), offset, format, File.join(PCAP_DIR, filename), temp_file.path] do |h|
+      h.read
+    end
+    Thread.new do
+      sleep 1
+      path = temp_file.path
+      temp_file.close
+      File.delete path
+    end
+    send_file temp_file
+  else
+    412
+  end
 end
 
 get '/api/autocomplete' do
   content_type :json
   query = Rack::Utils.parse_query request.query_string
-  q = query['query']
+  q = query['q'] || ''
   res = ''
   begin
     Timeout.timeout SEARCH_TIMEOUT do
@@ -68,7 +102,7 @@ get '/api/autocomplete' do
       sock.connect Socket.pack_sockaddr_un(SEARCH_SOCK)
       sock.write "\0\0\0#{q}"
       sock.close_write
-      res = {query: q, suggestions: sock.read.lines }.to_json
+      res = {query: q, suggestions: sock.read.lines.map(&:chomp) }.to_json
       sock.close
     end
   rescue
@@ -78,8 +112,8 @@ end
 
 get '/api/search' do
   query = Rack::Utils.parse_query request.query_string
-  q = begin query['q'] rescue 0 end
-  page = begin query['page'].to_i rescue 0 end
+  q = query['q'] || ''
+  page = (query['page'] || 0).to_i
   offset = page*PER_PAGE
   res = ''
   total = 0
@@ -103,9 +137,10 @@ get '/api/search' do
       .gsub('\\v', '\\x0b')
       .gsub('\\f', '\\x0c')
       .gsub('\\r', '\\x0d')
+      .gsub('\\', '\\x5c')
 
       res = lines[0..-2].map {|line|
-        filename, offset, context = line.split "\t"
+        filename, offset, context = line.chomp.split "\t"
         {filename: filename, offset: offset, context: context}
       }
       res_grouped = Hash.new {|h,k| h[k] = [] }
@@ -129,8 +164,8 @@ end
 
 get '/search' do
   query = Rack::Utils.parse_query request.query_string
-  q = begin query['q'] rescue 0 end
-  page = begin query['page'].to_i rescue 0 end
+  q = query['q'] || ''
+  page = (query['page'] || 0).to_i
   offset = page*PER_PAGE
   result = []
   total = 0

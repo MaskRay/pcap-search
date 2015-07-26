@@ -3,6 +3,6 @@ CXXFLAGS += -g3 -march=native -std=c++11 -Wno-deprecated-declarations -pthread
 #CXXFLAGS += -fno-default-inline
 #CXXFLAGS += -O3
 
-main: main.cc
-o3: main
+indexer: indexer.cc
+o3: indexer
 o3: CXXFLAGS += -O3

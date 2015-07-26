@@ -63,7 +63,7 @@ const char MAGIC_GOOD[] = "GOOD";
 
 const size_t BUF_SIZE = 512;
 const char LISTEN_PATH[] = "/tmp/search.sock";
-const string PCAP_SUFFIX = ".cap";
+const string PCAP_SUFFIX = ".ap";
 const string INDEX_SUFFIX = ".fm";
 const int SAMPLE_RATE = 32;
 const int SEARCH_LIMIT = 20;
@@ -173,6 +173,7 @@ string unescape(size_t n, const char *str)
         case 'v': ret += '\v'; i += 2; continue;
         case 'f': ret += '\f'; i += 2; continue;
         case 'r': ret += '\r'; i += 2; continue;
+        case '\\': ret += '\\'; i += 2; continue;
         }
       int j = i+1, v = 0;
       for (; j < n && j < i+4 && unsigned(str[j]-'0') < 8; j++)
@@ -1611,7 +1612,7 @@ void *serve_client(Worker *data)
       sort(candidates.begin(), candidates.end());
       candidates.erase(unique(candidates.begin(), candidates.end()), candidates.end());
       for (auto &cand: candidates)
-        dprintf(data->clifd, "%s\n", escape(cand.c_str()).c_str()); // may SIGPIPE
+        dprintf(data->clifd, "%s\n", escape(cand).c_str()); // may SIGPIPE
     } else {
       char *end;
       errno = 0;
@@ -1806,7 +1807,7 @@ void index_mode(const string &pcap_dir, bool do_inotify)
         err_exit(EX_IOERR, "fseek");
       if (fputs(MAGIC_BAD, fh) < 0)
         err_exit(EX_IOERR, "fputs");
-      if (fputs(MAGIC_BAD, fh) < 0) // length of PCAP
+      if (fputs(MAGIC_BAD, fh) < 0) // length of origin
         err_exit(EX_IOERR, "fputs");
       Serializer ar(fh);
       FMIndex fm;
@@ -1821,7 +1822,7 @@ void index_mode(const string &pcap_dir, bool do_inotify)
         unlink((pcap_dir+"/"+index_name).c_str());
         err_exit(EX_IOERR, "failed to process pcap file %s", name.c_str());
       }
-      log_action("created index for %s. PCAP: %ld, index: %ld, used %.3lf s\n", name.c_str(), pcap_size, index_size, sw.elapsed());
+      log_action("created index for %s. origin: %ld, index: %ld, used %.3lf s\n", name.c_str(), pcap_size, index_size, sw.elapsed());
     }
 quit:
     if (fh)
