@@ -2,7 +2,7 @@
 set -e -u
 setopt nullglob
 
-dshell_defcon=$(dirname $0)/dshell-defcon
+dshell_defcon=${0:a:h}/dshell-defcon
 
 usage() {
   cat <<e
