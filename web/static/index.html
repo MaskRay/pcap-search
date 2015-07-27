@@ -74,7 +74,7 @@
       <div class="searchbox">
         <div class="ui one columns grid container searchbox">
           <div class="ui column">
-            <h1 class="header">pcap Search<small if="loading">数据载入中</small></h1>
+            <h1 class="header">pcap Search<small if={loading}>数据载入中</small></h1>
             <div class="ui search">
               <div class="ui icon fluid input">
                 <input type="text" class="prompt" placeholder="Search..." onfocus={small} onkeypress={submit}>
@@ -121,10 +121,10 @@
             <a class="item" data-tab="second">Repr</a>
           </div>
           <div class="ui bottom attached active tab segment" data-tab="first">
-            <Hex></Hex>
+            <code class="hex">{hex}</code>
           </div>
           <div class="ui bottom attached tab segment" data-tab="second">
-            <code>{code}</code>
+            <code class="repr">{repr}</code>
           </div>
         </div>
         <div class="actions">
@@ -157,9 +157,8 @@
         // init the tab and the modal
         this.hex = ''
         this.repr = ''
-        this.loading = true;
         $('.modal.ui').modal()
-        $('.ui.tab').tab()
+        $('.ui.menu.tabular .item').tab()
       })
       download(file, offset, type){
         return "/download?filename="+ encodeURIComponent(file) + "&type=" + encodeURIComponent(type) + (offset == undefined?"":"&offset=" + encodeURIComponent(offset));
