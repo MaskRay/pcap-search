@@ -62,10 +62,9 @@ const char MAGIC_BAD[] = "BAD ";
 const char MAGIC_GOOD[] = "GOOD";
 
 const size_t BUF_SIZE = 512;
-const char LISTEN_PATH[] = "/tmp/search.sock";
-const string PCAP_SUFFIX = ".ap";
-const string INDEX_SUFFIX = ".fm";
-
+const char *listen_path = "/tmp/search.sock";
+string data_suffix = ".ap";
+string index_suffix = ".fm";
 long autocomplete_limit = 20;
 long autocomplete_length = 20;
 long context_length = 30;
@@ -217,6 +216,31 @@ void err_exit(int exitno, const char *format, ...)
 u32 clog2(u32 x)
 {
   return x > 1 ? 32-__builtin_clz(x-1) : 0;
+}
+
+u32 select_in_u16(u16 x, u32 k)
+{
+  for (; k; k--)
+    x &= x - 1;
+  return __builtin_ctz(x);
+}
+
+u32 select_in_u64(u64 x, i32 k)
+{
+  u32 c;
+  c =  __builtin_popcount(u16(x));
+  if (c > k) return select_in_u16(x, k) + 0;
+  x >>= 16;
+  k -= c;
+  c =  __builtin_popcount(u16(x));
+  if (c > k) return select_in_u16(x, k) + 16;
+  x >>= 16;
+  k -= c;
+  c =  __builtin_popcount(u16(x));
+  if (c > k) return select_in_u16(x, k) + 32;
+  x >>= 16;
+  k -= c;
+  return select_in_u16(x, k) + 48;
 }
 
 long get_long(const char *arg)
@@ -713,31 +737,6 @@ namespace KoAluru
 
 /// RRR
 
-u32 select_in_u16(u16 x, u32 k)
-{
-  for (; k; k--)
-    x &= x - 1;
-  return __builtin_ctz(x);
-}
-
-u32 select_in_u64(u64 x, i32 k)
-{
-  u32 c;
-  c =  __builtin_popcount(u16(x));
-  if (c > k) return select_in_u16(x, k) + 0;
-  x >>= 16;
-  k -= c;
-  c =  __builtin_popcount(u16(x));
-  if (c > k) return select_in_u16(x, k) + 16;
-  x >>= 16;
-  k -= c;
-  c =  __builtin_popcount(u16(x));
-  if (c > k) return select_in_u16(x, k) + 32;
-  x >>= 16;
-  k -= c;
-  return select_in_u16(x, k) + 48;
-}
-
 class RRR
 {
   static const int USE_TABLE_THRESHOLD = 15;
@@ -966,136 +965,6 @@ public:
     osample_bits_ = clog2(offsets_.size());
   }
 };
-
-// SDArray
-
-const u32 BLOCK_LEN = 1024;
-const u32 SUBBLOCK_LEN = 32;
-const u32 MAX_IN_BLOCK_OFFSET = 65536; // 2**16 u16
-
-struct identity_getter
-{
-  u64 operator()(u64 x) { return x; }
-};
-
-struct not_getter
-{
-  u64 operator()(u64 x) { return ~ x; }
-};
-
-// ref: Daisuke Okanohara & Kunihiko Sadakane. Practical Entropy-Compressed Rank/Select Dictionary
-template<typename WordGetter>
-class DArray
-{
-  SArray<i32> block_;
-  SArray<u16> subblock_;
-  SArray<u32> overflow_;
-  u32 num_ = 0;
-
-  void flush_cur_block(vector<u32> &pos, u32 &pblock, u32 &psubblock, u32 &poverflow) {
-    if (pos.back() - pos[0] < MAX_IN_BLOCK_OFFSET) {
-      block_[pblock++] = pos[0];
-      REPS(i, pos.size(), SUBBLOCK_LEN)
-        subblock_[psubblock++] = pos[i] - pos[0];
-    } else {
-      block_[pblock++] = ~ poverflow;
-      for (auto x: pos)
-        overflow_[poverflow++] = x;
-      REPS(i, pos.size(), SUBBLOCK_LEN)
-        subblock_[psubblock++] = -1; // arbitrary
-    }
-    pos.clear();
-  }
-
-  void flush_cur_block_preflight(vector<u32> &pos, u32 &nblock, u32 &nsubblock, u32 &noverflow) {
-    nblock++;
-    nsubblock += (pos.size()-1)/SUBBLOCK_LEN+1;
-    if (pos.back() - pos[0] >= MAX_IN_BLOCK_OFFSET)
-      noverflow += pos.size();
-    pos.clear();
-  }
-public:
-  void init(const SArray<u64> &bit_vec) {
-    vector<u32> pos;
-    u32 wlen = bit_vec.size();
-
-    u32 nblock = 0, nsubblock = 0, noverflow = 0;
-    REP(w, wlen) {
-      u32 i = w * 64;
-      u64 word = WordGetter()(bit_vec[w]);
-      while (word) {
-        int l = __builtin_ctzll(word);
-        i += l;
-        word >>= l;
-        pos.push_back(i);
-        i += 1;
-        word >>= 1;
-        num_++;
-        if (pos.size() == BLOCK_LEN)
-          flush_cur_block_preflight(pos, nblock, nsubblock, noverflow);
-      }
-    }
-    if (pos.size())
-      flush_cur_block_preflight(pos, nblock, nsubblock, noverflow);
-
-    block_.init(nblock);
-    subblock_.init(nsubblock);
-    overflow_.init(noverflow);
-
-    u32 pblock = 0, psubblock = 0, poverflow = 0;
-    REP(w, wlen) {
-      u32 i = w * 64;
-      u64 word = WordGetter()(bit_vec[w]);
-      while (word) {
-        int l = __builtin_ctzll(word);
-        i += l;
-        word >>= l;
-        pos.push_back(i);
-        i += 1;
-        word >>= 1;
-        num_++;
-        if (pos.size() == BLOCK_LEN)
-          flush_cur_block(pos, pblock, psubblock, poverflow);
-      }
-    }
-    if (pos.size())
-      flush_cur_block(pos, pblock, psubblock, poverflow);
-  }
-
-  size_t space_consumption() const {
-    return block_.size()*4 + subblock_.size()*2 + overflow_.size()*4;
-  }
-
-  u32 select(const SArray<u64> &bit_vec, u32 idx) const {
-    u32 bi = idx / BLOCK_LEN;
-    i32 bpos = block_[bi];
-    if (bpos < 0)
-      return overflow_[~ bpos + idx%BLOCK_LEN];
-    u32 sbi = idx / SUBBLOCK_LEN,
-        p = bpos + subblock_[sbi],
-        rem = idx % SUBBLOCK_LEN,
-        wi = p / 64;
-    if (! rem)
-      return p;
-    u64 word = WordGetter()(bit_vec[wi]) & (-1ull << p%64);
-    for(;;) {
-      u32 pop = __builtin_popcountll(word);
-      if (rem < pop) break;
-      rem -= pop;
-      wi++;
-      word = WordGetter()(bit_vec[wi]);
-    }
-    return wi * 64 + select_in_u64(word, rem);
-  }
-
-  template<typename Archive>
-  void serialize(Archive &ar) {
-    ar & block_ & subblock_ & overflow_;
-  }
-};
-
-typedef DArray<not_getter> DArray0;
-typedef DArray<identity_getter> DArray1;
 
 class EliasFanoBuilder
 {
@@ -1425,75 +1294,36 @@ struct Deserializer
   }
 };
 
-int main2()
-{
-  /*
-  vector<u32> a{1,1,3,4,4,6,100,2000,3000,2147483647};
-  EliasFanoBuilder efb(a.size(), a.back());
-  for (auto x: a) efb.push(x);
-  EliasFano ef(efb);
-  printf("l: %d\n", ef.l_);
-  printf("n highs: %zd\n", ef.highs_.size());
-  printf("space: %zd\n", ef.space_consumption());
-  REP(i, a.size())
-    printf("%zd: %u\n", i, ef[i]);
-    */
-
-  /*
-  const char c_text[] = "aabababa";
-  u8 *text = (u8*)c_text;
-  u32 n = sizeof(c_text)-1;
-
-  u8 buf[99];
-  auto fm = new FMIndex(n, text, 10);
-  while (gets((char*)buf)) {
-    u32 n = strlen((char*)buf);
-    printf("= %zd\n", fm->count(n, buf));
-    auto xs = fm->locate(n, buf, 100);
-    printf("= %zd\n", xs.size());
-    for (auto x:xs)printf("%d ",x);
-    puts("");
-  }
-  delete fm;
-  */
-
-  // serialization
-  /*
-  int n = 100000;
-  int *xs = new int[n];
-  REP(i,n)xs[i] = i&255;
-  WaveletMatrix x(n, xs);
-  //REP(i,n)
-  //  printf("%d: %d\n", i, x.at(i));
-  delete[] xs;
-
-  char *buf;
-  size_t size;
-  FILE *fh = open_memstream(&buf, &size);
-  Serializer se(fh);
-
-  se & x;
-  fflush(fh);
-  fclose(fh);
-
-  WaveletMatrix y;
-  int seven;
-  fseek(fh, 0, SEEK_SET);
-  Deserializer de(buf);
-
-  de & y;
-  REP(i,n)
-    assert(y.at(i) == (i&255));
-  //de & seven;
-  //REP(i, n)
-  //assert(seven == 7);
-  */
-
-}
-
 void print_help(FILE *fh)
 {
-  fprintf(fh, "Usage: %s [OPTIONS]\n", program_invocation_short_name);
+  fprintf(fh, "Usage: %s [OPTIONS] dir\n", program_invocation_short_name);
+  fputs(
+        "\n"
+        "Options:\n"
+        "  index mode:\n"
+        "  --autocomplete-length L\n"
+        "  --autocomplete-limit C\n"
+        "  --fmindex-sample-rate R   sample rate of suffix array (for rank -> pos) used in FM index\n"
+        "  --rrr-sample-rate R       R blocks are grouped to a superblock\n"
+        "  -o, --oneshot             index mode. run only once (no inotify)\n"
+        "\n"
+        "  server mode:\n"
+        "  --context-length L\n"
+        "  -l, --search-limit        server mode. max number of results\n"
+        "\n"
+        "  others:\n"
+        "  -i, --index               index mode. (default: server mode)\n"
+        "  -s, --data-suffix         data file suffix. (default: .ap)\n"
+        "  -S, --index-suffix        index file suffix. (default: .fm)\n"
+        "  -h, --help                display this help and exit\n"
+        "\n"
+        "Examples:\n"
+        "  zsh0: ./indexer -o -i /tmp/ray && ./indexer /tmp/ray # build index oneshot and run server\n"
+        "  zsh0: ./indexer -i /tmp/ray # build index and use inotify to watch changes within /tmp/ray, creating indices upon CLOSE_WRITE after CREATE/MODIFY, and MOVED_TO, removing indices upon DELETE and MOVED_FROM\n"
+        "  zsh1: print -rn -- $'\\0\\0\\0haystack' | socat -t 60 - /tmp/search.sock # autocomplete\n"
+        "  zsh1: print -rn -- $'3\\0\\0\\0haystack' | socat -t 60 - /tmp/search.sock # search, offset=3\n"
+        "  zsh1: print -rn -- $'5\\0a\\0b\\0ha\\0stack\\0' | socat -t 60 - /tmp/search.sock # search filenames F satisfying (\"a\" <= F <= \"b\"), offset=5. NUL is allowed in pattern\n"
+        , fh);
   exit(fh == stdout ? 0 : EX_USAGE);
 }
 
@@ -1508,32 +1338,32 @@ struct Entry
   FMIndex *fm;
 };
 
-bool is_pcap(const string &name)
+bool is_data(const string &name)
 {
-  return name.size() >= PCAP_SUFFIX.size() && name.substr(name.size()-PCAP_SUFFIX.size()) == PCAP_SUFFIX;
+  return name.size() >= data_suffix.size() && name.substr(name.size()-data_suffix.size()) == data_suffix;
 }
 
-void process_dir(const string &pcap_dir, bool do_inotify, int &inotify_fd, function<void(string)> fn)
+void process_dir(const string &data_dir, bool do_inotify, int &inotify_fd, function<void(string)> fn)
 {
   if (do_inotify) {
     if ((inotify_fd = inotify_init()) < 0)
       err_exit(EX_USAGE, "inotify_init");
-    if (inotify_add_watch(inotify_fd, pcap_dir.c_str(), IN_CLOSE_WRITE | IN_CREATE | IN_DELETE | IN_MODIFY | IN_MOVE) < 0)
+    if (inotify_add_watch(inotify_fd, data_dir.c_str(), IN_CLOSE_WRITE | IN_CREATE | IN_DELETE | IN_MODIFY | IN_MOVE) < 0)
       err_exit(EX_USAGE, "inotify_add_watch");
   }
-  DIR *dir = opendir(pcap_dir.c_str());
+  DIR *dir = opendir(data_dir.c_str());
   if (! dir)
     err_exit(EX_OSERR, "opendir");
   struct dirent dirent, *res;
   while (readdir_r(dir, &dirent, &res) == 0 && res) {
     string name = dirent.d_name;
-    if (is_pcap(name))
+    if (is_data(name))
       fn(name);
   }
   closedir(dir);
 }
 
-void process_inotify(const string &pcap_dir, int inotify_fd, set<string> &modified, function<void(string)> add_fn, function<void(string)> rm_fn)
+void process_inotify(const string &data_dir, int inotify_fd, set<string> &modified, function<void(string)> add_fn, function<void(string)> rm_fn)
 {
   char buf[sizeof(inotify_event)+NAME_MAX+1];
   int nread;
@@ -1541,7 +1371,7 @@ void process_inotify(const string &pcap_dir, int inotify_fd, set<string> &modifi
     err_exit(EX_OSERR, "failed to read inotify fd");
   for (auto *ev = (inotify_event *)buf; (char *)ev < (char *)buf+nread;
        ev = (inotify_event *)((char *)ev + sizeof(inotify_event) + ev->len))
-    if (ev->len > 0 && is_pcap(ev->name)) {
+    if (ev->len > 0 && is_data(ev->name)) {
       if (ev->mask & IN_CREATE) {
         log_event("CREATE %s\n", ev->name);
         modified.insert(ev->name);
@@ -1561,7 +1391,7 @@ void process_inotify(const string &pcap_dir, int inotify_fd, set<string> &modifi
       else if (ev->mask & IN_CLOSE_WRITE) {
         if (modified.count(ev->name)) {
           modified.erase(ev->name);
-          log_event("MODIFY then CLOSE_WRITE %s\n", ev->name);
+          log_event("CLOSE_WRITE after MODIFY %s\n", ev->name);
           add_fn(ev->name);
         }
       }
@@ -1665,7 +1495,7 @@ quit:
   return NULL;
 }
 
-void server_mode(const string &pcap_dir)
+void server_mode(const string &data_dir)
 {
   signal(SIGPIPE, SIG_IGN);
 
@@ -1686,15 +1516,15 @@ void server_mode(const string &pcap_dir)
   };
 
   auto add_fn = [&](string name) {
-    string index_name = name+INDEX_SUFFIX;
+    string index_name = name+index_suffix;
     auto entry = make_shared<Entry>();
     entry->valid = true;
     entry->mmap = MAP_FAILED;
     entry->index_mmap = MAP_FAILED;
     errno = 0;
-    if ((entry->fd = open((pcap_dir+"/"+name).c_str(), O_RDONLY)) < 0)
+    if ((entry->fd = open((data_dir+"/"+name).c_str(), O_RDONLY)) < 0)
       goto quit;
-    if ((entry->index_fd = open((pcap_dir+"/"+index_name).c_str(), O_RDONLY)) < 0) {
+    if ((entry->index_fd = open((data_dir+"/"+index_name).c_str(), O_RDONLY)) < 0) {
       if (errno == ENOENT)
         errno = 0;
       goto quit;
@@ -1741,7 +1571,7 @@ quit:
       err_msg("processing index file %s", index_name.c_str());
   };
 
-  process_dir(pcap_dir, true, inotify_fd, add_fn);
+  process_dir(data_dir, true, inotify_fd, add_fn);
   log_status("start inotify\n");
 
   int sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -1749,7 +1579,7 @@ quit:
     err_exit(EX_OSERR, "socket");
   struct sockaddr_un addr = {};
   addr.sun_family = AF_UNIX;
-  strncpy(addr.sun_path, LISTEN_PATH, sizeof(addr.sun_path)-1);
+  strncpy(addr.sun_path, listen_path, sizeof(addr.sun_path)-1);
   unlink(addr.sun_path);
   if (bind(sockfd, (struct sockaddr *)&addr, sizeof addr) < 0)
     err_exit(EX_OSERR, "bind");
@@ -1768,7 +1598,7 @@ quit:
       err_exit(EX_OSERR, "select");
     }
     if (FD_ISSET(inotify_fd, &rfds))
-      process_inotify(pcap_dir, inotify_fd, modified, add_fn, rm_fn);
+      process_inotify(data_dir, inotify_fd, modified, add_fn, rm_fn);
     if (FD_ISSET(sockfd, &rfds)) {
       int clifd = accept(sockfd, NULL, NULL);
       if (clifd < 0)
@@ -1787,22 +1617,22 @@ quit:
   }
 }
 
-void index_mode(const string &pcap_dir, bool do_inotify)
+void index_mode(const string &data_dir, bool do_inotify)
 {
   int inotify_fd;
 
   auto add_fn = [&](string name) {
-    string index_name = name+INDEX_SUFFIX;
+    string index_name = name+index_suffix;
     int index_fd = -1, pcap_fd = -1;
     off_t pcap_size;
     void *pcap_content = MAP_FAILED;
     FILE *fh = NULL;
     errno = 0;
-    if ((pcap_fd = open((pcap_dir+"/"+name).c_str(), O_RDONLY)) < 0)
+    if ((pcap_fd = open((data_dir+"/"+name).c_str(), O_RDONLY)) < 0)
       goto quit;
     if ((pcap_size = lseek(pcap_fd, 0, SEEK_END)) < 0)
       goto quit;
-    if ((index_fd = open((pcap_dir+"/"+index_name).c_str(), O_RDWR | O_CREAT, 0666)) < 0)
+    if ((index_fd = open((data_dir+"/"+index_name).c_str(), O_RDWR | O_CREAT, 0666)) < 0)
       goto quit;
     {
       char buf[8];
@@ -1841,7 +1671,7 @@ void index_mode(const string &pcap_dir, bool do_inotify)
       fputs(MAGIC_GOOD, fh);
       fwrite(&pcap_size, 4, 1, fh);
       if (ferror(fh)) {
-        unlink((pcap_dir+"/"+index_name).c_str());
+        unlink((data_dir+"/"+index_name).c_str());
         err_exit(EX_IOERR, "failed to process pcap file %s", name.c_str());
       }
       log_action("created index for %s. origin: %ld, index: %ld, used %.3lf s\n", name.c_str(), pcap_size, index_size, sw.elapsed());
@@ -1860,12 +1690,12 @@ quit:
   };
 
   auto rm_fn = [&](string name) {
-    string path = pcap_dir+"/"+name+INDEX_SUFFIX;
+    string path = data_dir+"/"+name+index_suffix;
     unlink(path.c_str());
     log_action("unlinked %s\n", path.c_str());
   };
 
-  process_dir(pcap_dir, do_inotify, inotify_fd, add_fn);
+  process_dir(data_dir, do_inotify, inotify_fd, add_fn);
 
   set<string> modified;
   if (do_inotify) {
@@ -1879,7 +1709,7 @@ quit:
         if (errno == EINTR) continue;
         err_exit(EX_OSERR, "select");
       }
-      process_inotify(pcap_dir, inotify_fd, modified, add_fn, rm_fn);
+      process_inotify(data_dir, inotify_fd, modified, add_fn, rm_fn);
     }
   }
 }
@@ -1965,18 +1795,19 @@ int main(int argc, char *argv[])
     {"autocomplete-length", required_argument, 0,   1},
     {"autocomplete-limit",  required_argument, 0,   2},
     {"context-length",      no_argument,       0,   3},
+    {"data-suffix",         required_argument, 0,   's'},
     {"fmindex-sample-rate", required_argument, 0,   'f'},
-    {"oneshot",             no_argument,       0,   'o'},
-    {"limit",               required_argument, 0,   'l'},
-    {"index",               no_argument,       0,   'i'},
     {"help",                no_argument,       0,   'h'},
-    {"request-timeout",     required_argument, 0,   3},
-    {"rrr-sample-rate",     required_argument, 0,   'r'},
-    {"sample-rate",         required_argument, 0,   's'},
+    {"index",               no_argument,       0,   'i'},
+    {"index-suffix",        required_argument, 0,   'S'},
+    {"oneshot",             no_argument,       0,   'o'},
+    {"request-timeout",     required_argument, 0,   4},
+    {"rrr-sample-rate",     required_argument, 0,   5},
+    {"search-limit",        required_argument, 0,   'l'},
     {0,                     0,                 0,   0},
   };
 
-  while ((opt = getopt_long(argc, argv, "f:hil:or:", long_options, NULL)) != -1) {
+  while ((opt = getopt_long(argc, argv, "f:hil:or:p:s:S:", long_options, NULL)) != -1) {
     switch (opt) {
     case 1:
       autocomplete_length = get_long(optarg);
@@ -1986,6 +1817,12 @@ int main(int argc, char *argv[])
       break;
     case 3:
       context_length = get_long(optarg);
+      break;
+    case 4:
+      request_timeout_milli = get_long(optarg);
+      break;
+    case 5:
+      rrr_sample_rate = get_long(optarg);
       break;
     case 'f':
       fmindex_sample_rate = get_long(optarg);
@@ -2002,8 +1839,14 @@ int main(int argc, char *argv[])
     case 'o':
       do_inotify = false;
       break;
-    case 'r':
-      rrr_sample_rate = get_long(optarg);
+    case 'p':
+      listen_path = optarg;
+      break;
+    case 's':
+      data_suffix = optarg;
+      break;
+    case 'S':
+      index_suffix = optarg;
       break;
     case '?':
       print_help(stderr);
@@ -2011,8 +1854,8 @@ int main(int argc, char *argv[])
     }
   }
   if (optind+1 != argc)
-    err_exit(EX_USAGE, "one argument");
-  const char *pcap_dir = argv[optind];
+    print_help(stderr);
+  const char *data_dir = argv[optind];
 
 #define D(name) printf("%s: %ld\n", #name, name)
 
@@ -2020,14 +1863,14 @@ int main(int argc, char *argv[])
     log_status("index mode\n");
     D(fmindex_sample_rate);
     D(rrr_sample_rate);
-    index_mode(pcap_dir, do_inotify);
+    index_mode(data_dir, do_inotify);
   } else {
     log_status("server mode\n");
     D(autocomplete_length);
     D(autocomplete_limit);
     D(context_length);
     D(search_limit);
-    server_mode(pcap_dir);
+    server_mode(data_dir);
   }
 
 #undef D
