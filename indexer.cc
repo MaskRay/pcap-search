@@ -1343,6 +1343,11 @@ bool is_data(const string &name)
   return name.size() >= data_suffix.size() && name.substr(name.size()-data_suffix.size()) == data_suffix;
 }
 
+bool is_index(const string &name)
+{
+  return name.size() >= index_suffix.size() && name.substr(name.size()-index_suffix.size()) == index_suffix;
+}
+
 void process_dir(const string &data_dir, bool do_inotify, int &inotify_fd, function<void(string)> fn)
 {
   if (do_inotify) {
@@ -1363,7 +1368,7 @@ void process_dir(const string &data_dir, bool do_inotify, int &inotify_fd, funct
   closedir(dir);
 }
 
-void process_inotify(const string &data_dir, int inotify_fd, set<string> &modified, function<void(string)> add_fn, function<void(string)> rm_fn)
+void process_inotify(const string &data_dir, int inotify_fd, bool is_index_mode, set<string> &modified, function<void(string)> add_fn, function<void(string)> rm_fn)
 {
   char buf[sizeof(inotify_event)+NAME_MAX+1];
   int nread;
@@ -1371,31 +1376,35 @@ void process_inotify(const string &data_dir, int inotify_fd, set<string> &modifi
     err_exit(EX_OSERR, "failed to read inotify fd");
   for (auto *ev = (inotify_event *)buf; (char *)ev < (char *)buf+nread;
        ev = (inotify_event *)((char *)ev + sizeof(inotify_event) + ev->len))
-    if (ev->len > 0 && is_data(ev->name)) {
-      if (ev->mask & IN_CREATE) {
-        log_event("CREATE %s\n", ev->name);
-        modified.insert(ev->name);
-      } else if (ev->mask & IN_DELETE) {
-        log_event("DELETE %s\n", ev->name);
-        modified.erase(ev->name);
-        rm_fn(ev->name);
-      } else if (ev->mask & IN_MOVED_FROM) {
-        log_event("MOVED_FROM %s\n", ev->name);
-        modified.erase(ev->name);
-        rm_fn(ev->name);
-      } else if (ev->mask & IN_MOVED_TO) {
-        log_event("MOVED_TO %s\n", ev->name);
-        add_fn(ev->name);
-      } else if (ev->mask & IN_MODIFY)
-        modified.insert(ev->name);
-      else if (ev->mask & IN_CLOSE_WRITE) {
-        if (modified.count(ev->name)) {
-          modified.erase(ev->name);
-          log_event("CLOSE_WRITE after MODIFY %s\n", ev->name);
-          add_fn(ev->name);
+    if (ev->len > 0)
+      if (is_index_mode ? is_data(ev->name) : is_index(ev->name)) {
+        string name = ev->name;
+        if (! is_index_mode)
+          name = name.substr(0, name.size()-index_suffix.size());
+        if (ev->mask & IN_CREATE) {
+          log_event("CREATE %s\n", name.c_str());
+          modified.insert(name);
+        } else if (ev->mask & IN_DELETE) {
+          log_event("DELETE %s\n", name.c_str());
+          modified.erase(name);
+          rm_fn(name);
+        } else if (ev->mask & IN_MOVED_FROM) {
+          log_event("MOVED_FROM %s\n", name.c_str());
+          modified.erase(name);
+          rm_fn(name);
+        } else if (ev->mask & IN_MOVED_TO) {
+          log_event("MOVED_TO %s\n", name.c_str());
+          add_fn(name);
+        } else if (ev->mask & IN_MODIFY)
+          modified.insert(name);
+        else if (ev->mask & IN_CLOSE_WRITE) {
+          if (modified.count(name)) {
+            modified.erase(name);
+            log_event("CLOSE_WRITE after MODIFY %s\n", name.c_str());
+            add_fn(name);
+          }
         }
       }
-    }
 }
 
 struct Worker
@@ -1457,7 +1466,7 @@ void *serve_client(Worker *data)
           string pattern = unescape(len, p);
           entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), true, autocomplete_limit, skip, res);
           FOR(i, old_size, res.size())
-            candidates.emplace_back((char*)entry->mmap+res[i], (char*)entry->mmap+min(long(entry->size), res[i]+autocomplete_length));
+            candidates.emplace_back((char*)entry->mmap+res[i], (char*)entry->mmap+min(long(entry->size), res[i]+len+autocomplete_length));
           if (res.size() >= autocomplete_limit) break;
         }
       }
@@ -1598,7 +1607,7 @@ quit:
       err_exit(EX_OSERR, "select");
     }
     if (FD_ISSET(inotify_fd, &rfds))
-      process_inotify(data_dir, inotify_fd, modified, add_fn, rm_fn);
+      process_inotify(data_dir, inotify_fd, false, modified, add_fn, rm_fn);
     if (FD_ISSET(sockfd, &rfds)) {
       int clifd = accept(sockfd, NULL, NULL);
       if (clifd < 0)
@@ -1709,7 +1718,7 @@ quit:
         if (errno == EINTR) continue;
         err_exit(EX_OSERR, "select");
       }
-      process_inotify(data_dir, inotify_fd, modified, add_fn, rm_fn);
+      process_inotify(data_dir, inotify_fd, true, modified, add_fn, rm_fn);
     }
   }
 }
