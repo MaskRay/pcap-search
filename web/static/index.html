@@ -49,6 +49,10 @@
     font-width: bold;
     color: red;
   }
+  code.hex, code.repr{
+    overflow-x: scroll;
+    display: block !important;
+  }
   </style>
   <link rel="stylesheet" href="/semantic.min.css">
   <script src="/jquery.min.js"></script>
@@ -86,20 +90,19 @@
           </div>
         </div>
       </div>
-      <div class="ui one column grid container resultBox">
+      <div class="ui one column grid container resultBox" onscroll={scroll}>
         <div each={n, page in pages} class="ui column" id={'page'+n}>
           <h2 class="ui centered inverted header">
             <div class="">Page {n}</div>
           </h2>
           <div each={file, packs in page} class="ui segments">
             <div class="ui segment">
-              {file}
+              {file} <a class="ui button" href={download(file, null, 'all')} target="_blank"><i class="ui download icon"></i>下载</a>
             </div>
             <div class="ui secondary segment">
               <div class="ui divided list">
                 <div class="item" each={packs}>
                   <div class="right floated content">
-                    <a class="ui button" href={download(file, null, 'all')} target="_blank">ALL</a>
                     <a class="ui button" href={download(file, offset, 'pcap')} target="_blank">PCAP</a>
                     <div class="ui button" onclick={open.bind(this, file, offset)}>View</div>
                   </div>
@@ -166,10 +169,13 @@
       small(){
         $('body').removeClass('none')
       }
+      scroll(e){
+        console.log(e)
+      }
       open(file, offset){
         // clean the original data
-        this.hex = undefined;
-        this.repr = undefined;
+        this.hex = '';
+        this.repr = '';
         // fetch the data
         this.loading = true
         this.update() // animate
@@ -177,11 +183,13 @@
           console.log(response)
           this.loading = false // now we can show a modal
           this.hex = response
+          this.update()
           $('.ui.modal').modal('show');
-          $.get(this.download(file, offset, 'repr'), {}, function(response){
-            this.repr = response
-          }, 'text')
         }.bind(this), 'text') // hex is default
+        $.get(this.download(file, offset, 'repr'), {}, function(response){
+          this.repr = response
+          this.update()
+        }.bind(this), 'text')
       }
       show_complete(e){
         var input_text = e.target.value;
