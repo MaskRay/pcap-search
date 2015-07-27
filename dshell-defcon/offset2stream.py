@@ -31,7 +31,7 @@ def out_pcap(*args):
 out_end_pcap = out_pcap
 
 
-def out_repr(srcip, srcport, destip, dstport, data):
+def out_repr(srcip, srcport, destip, dstport, data, direction):
     print >>_out_file, socket.inet_ntoa(struct.pack('I', srcip)) + ':' + str(srcport),
     print >>_out_file, ' --> ',
     print >>_out_file, socket.inet_ntoa(struct.pack('I', destip)) + ':' + str(dstport),
@@ -40,7 +40,7 @@ def out_repr(srcip, srcport, destip, dstport, data):
     print >>_out_file, "--------------------------------------------"
 
 
-def out_hex(srcip, srcport, destip, dstport, data):
+def out_hex(srcip, srcport, destip, dstport, data, direction):
     print >>_out_file, socket.inet_ntoa(struct.pack('I', srcip)) + ':' + str(srcport),
     print >>_out_file, ' --> ',
     print >>_out_file, socket.inet_ntoa(struct.pack('I', destip)) + ':' + str(dstport),
@@ -50,13 +50,41 @@ def out_hex(srcip, srcport, destip, dstport, data):
     print >>_out_file, "--------------------------------------------"
 
 
-def out_str(srcip, srcport, destip, dstport, data):
+def out_str(srcip, srcport, destip, dstport, data, direction):
     print >>_out_file, socket.inet_ntoa(struct.pack('I', srcip)) + ':' + str(srcport),
     print >>_out_file, ' --> ',
     print >>_out_file, socket.inet_ntoa(struct.pack('I', destip)) + ':' + str(dstport),
     print >>_out_file, '(%d bytes)' % len(data)
     print >>_out_file, str(data)
     print >>_out_file, "--------------------------------------------"
+
+
+def out_begin_python(*args):
+    out_begin_hex()
+    print >>_out_file, '#!/usr/bin/env python2'
+    print >>_out_file, '#-*- coding:utf-8 -*-'
+    print >>_out_file, 'try: from termcolor import colored'
+    print >>_out_file, 'except:'
+    print >>_out_file, '    def colored(text, color=None, on_color=None, attrs=None):'
+    print >>_out_file, '        return text'
+    print >>_out_file, 'peers = [{}, {}]'
+    print >>_out_file, 'seq = []'
+    print >>_out_file, 'idx = 0'
+
+
+def out_end_python():
+    print >>_out_file, "colors = ['cyan', 'yellow']"
+    print >>_out_file, 'for s, o in seq: print colored(repr(peers[s][o]), colors[s])'
+    if _out_file != sys.stdout:
+        _out_file.close()
+
+def out_python(srcip, srcport, destip, dstport, data, direction):
+    _idir = {'sc': 0, 'cs': 1}
+    idir = _idir[direction]
+    print >>_out_file, "idx += 1"
+    print >>_out_file, "peers[%d][idx] = %s" % (idir, repr(data))
+    print >>_out_file, "seq.append((%d, idx))" % (idir)
+
 
 def out_begin_pcap(_pkts):
     import dpkt
@@ -101,9 +129,9 @@ for i in len_conns:
             len_data = struct.unpack('I', ff.read(4))[0]
             data = ff.read(len_data)
             if direction == 'c':
-                out(cliip, cliport, servip, servport, data)
+                out(cliip, cliport, servip, servport, data, 'cs')
             else:
-                out(servip, servport, cliip, cliport, data)
+                out(servip, servport, cliip, cliport, data, 'sc')
         out_end()
         break
     current_offset += i
