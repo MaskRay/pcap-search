@@ -99,7 +99,7 @@ def out_end_python():
     if _out_file != sys.stdout:
         _out_file.close()
 
-def out_python(srcip, srcport, destip, dstport, data, direction):
+def out_python(srcip, srcport, destip, dstport, data, direction, ff):
     _idir = {'sc': 0, 'cs': 1}
     idir = _idir[direction]
     print >>_out_file, "idx += 1"
