@@ -1707,9 +1707,9 @@ void server_mode(const string &pcap_dir, u32 search_limit)
     return;
 quit:
     if (entry->index_mmap != MAP_FAILED)
-      munmap(entry->index_mmap, entry->size);
+      munmap(entry->index_mmap, entry->index_size);
     if (entry->mmap != MAP_FAILED)
-      munmap(entry->mmap, entry->index_size);
+      munmap(entry->mmap, entry->size);
     if (entry->index_fd >= 0)
       close(entry->index_fd);
     if (entry->fd >= 0)
