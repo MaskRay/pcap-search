@@ -62,7 +62,8 @@ def out_str(srcip, srcport, destip, dstport, data, direction):
 
 
 def out_begin_python(*args):
-    out_begin_hex()
+    global _out_file
+    _out_file = open(sys.argv[5], 'wb')
     print >>_out_file, '#!/usr/bin/env python2'
     print >>_out_file, '#-*- coding:utf-8 -*-'
     print >>_out_file, 'try: from termcolor import colored'
