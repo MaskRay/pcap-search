@@ -106,7 +106,7 @@ Example:
 
             clientip = struct.unpack('I', socket.inet_aton(connection.clientip))[0]
             serverip = struct.unpack('I', socket.inet_aton(connection.serverip))[0]
-            outdata = struct.pack('IIIHH', len(connection.blobs), clientip, serverip, connection.clientport, connection.serverport)
+            outdata = struct.pack('IIIHHI', len(connection.blobs), clientip, serverip, connection.clientport, connection.serverport, int(connection.starttime))
             outdata += struct.pack('I', len(connection.pkts))
             for i in connection.pkts:
                 outdata += struct.pack('I', i)
