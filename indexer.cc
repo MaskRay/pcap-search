@@ -1659,6 +1659,7 @@ void server_mode(const string &pcap_dir, u32 search_limit)
       munmap(old->index_mmap, old->index_size);
       close(old->fd);
       close(old->index_fd);
+      name2entry.erase(name);
     }
   };
 
