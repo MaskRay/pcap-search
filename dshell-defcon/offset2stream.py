@@ -19,7 +19,7 @@ _out_file = sys.stdout
 def out_end_str(*args):
     if _out_file != sys.stdout:
         _out_file.close()
-out_end_repr = out_end_hex = out_end_str
+out_end_loc = out_end_repr = out_end_hex = out_end_str
 
 def out_begin_hex(*args):
     global _out_file
@@ -27,13 +27,21 @@ def out_begin_hex(*args):
     print >>_out_file, 'Time: ', time.ctime(args[1])
 out_begin_str = out_begin_repr = out_begin_hex
 
+def out_begin_loc(*args):
+    global _out_file
+    _out_file = open(sys.argv[5], 'wb')
+
 
 def out_pcap(*args):
     pass
 out_end_pcap = out_pcap
 
+def out_loc(srcip, srcport, destip, dstport, data, direction, ff):
+    if ff.tell() > offset and ff.tell() - len(data) <= offset:
+        print ff.tell() - len(data), ff.tell()
 
-def out_repr(srcip, srcport, destip, dstport, data, direction):
+
+def out_repr(srcip, srcport, destip, dstport, data, direction, ff):
     print >>_out_file, socket.inet_ntoa(struct.pack('I', srcip)) + ':' + str(srcport),
     print >>_out_file, ' --> ',
     print >>_out_file, socket.inet_ntoa(struct.pack('I', destip)) + ':' + str(dstport),
@@ -42,7 +50,7 @@ def out_repr(srcip, srcport, destip, dstport, data, direction):
     print >>_out_file, "--------------------------------------------"
 
 
-def out_hex(srcip, srcport, destip, dstport, data, direction):
+def out_hex(srcip, srcport, destip, dstport, data, direction, ff):
     print >>_out_file, socket.inet_ntoa(struct.pack('I', srcip)) + ':' + str(srcport),
     print >>_out_file, ' --> ',
     print >>_out_file, socket.inet_ntoa(struct.pack('I', destip)) + ':' + str(dstport),
@@ -52,7 +60,7 @@ def out_hex(srcip, srcport, destip, dstport, data, direction):
     print >>_out_file, "--------------------------------------------"
 
 
-def out_str(srcip, srcport, destip, dstport, data, direction):
+def out_str(srcip, srcport, destip, dstport, data, direction, ff):
     print >>_out_file, socket.inet_ntoa(struct.pack('I', srcip)) + ':' + str(srcport),
     print >>_out_file, ' --> ',
     print >>_out_file, socket.inet_ntoa(struct.pack('I', destip)) + ':' + str(dstport),
@@ -131,9 +139,9 @@ for i in len_conns:
             len_data = struct.unpack('I', ff.read(4))[0]
             data = ff.read(len_data)
             if direction == 'c':
-                out(cliip, cliport, servip, servport, data, 'cs')
+                out(cliip, cliport, servip, servport, data, 'cs', ff)
             else:
-                out(servip, servport, cliip, cliport, data, 'sc')
+                out(servip, servport, cliip, cliport, data, 'sc', ff)
         out_end()
         break
     current_offset += i
