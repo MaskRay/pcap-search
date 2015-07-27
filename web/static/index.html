@@ -49,8 +49,9 @@
     font-width: bold;
     color: red;
   }
-  code.hex, code.repr{
+  code.hex, code.repr, code.str{
     overflow-x: scroll;
+    white-space: pre-wrap;
     display: block !important;
   }
   </style>
@@ -121,13 +122,17 @@
         <div class='content'>
           <div class="ui top attached tabular menu">
             <a class="active item" data-tab="first">Hex</a>
-            <a class="item" data-tab="second">Repr</a>
+            <a class="item" data-tab="second">Hex</a>
+            <a class="item" data-tab="third">String</a>
           </div>
           <div class="ui bottom attached active tab segment" data-tab="first">
             <code class="hex">{hex}</code>
           </div>
           <div class="ui bottom attached tab segment" data-tab="second">
             <code class="repr">{repr}</code>
+          </div>
+          <div class="ui bottom attached tab segment" data-tab="third">
+            <code class="str">{str}</code>
           </div>
         </div>
         <div class="actions">
@@ -176,6 +181,7 @@
         // clean the original data
         this.hex = '';
         this.repr = '';
+        this.str = "";
         // fetch the data
         this.loading = true
         this.update() // animate
@@ -188,6 +194,10 @@
         }.bind(this), 'text') // hex is default
         $.get(this.download(file, offset, 'repr'), {}, function(response){
           this.repr = response
+          this.update()
+        }.bind(this), 'text')
+        $.get(this.download(file, offset, 'str'), {}, function(response){
+          this.str = response
           this.update()
         }.bind(this), 'text')
       }
