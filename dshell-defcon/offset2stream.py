@@ -15,11 +15,19 @@ ff.seek(-4 * (1 + total_conns), 2)
 len_conns = list(struct.unpack('I' * total_conns, ff.read(4 * total_conns)))
 
 _out_file = sys.stdout
+_offset_in_data = False
 
 def out_end_str(*args):
     if _out_file != sys.stdout:
         _out_file.close()
-out_end_loc = out_end_repr = out_end_hex = out_end_str
+out_end_repr = out_end_hex = out_end_str
+
+def out_end_loc(*args):
+    if not _offset_in_data:
+        print >>_out_file, -1, -1
+    if _out_file != sys.stdout:
+        _out_file.close()
+
 
 def out_begin_hex(*args):
     global _out_file
@@ -37,8 +45,10 @@ def out_pcap(*args):
 out_end_pcap = out_pcap
 
 def out_loc(srcip, srcport, destip, dstport, data, direction, ff):
+    global _offset_in_data
     if ff.tell() > offset and ff.tell() - len(data) <= offset:
-        print ff.tell() - len(data), ff.tell()
+        _offset_in_data = True
+        print >>_out_file, ff.tell() - len(data), ff.tell()
 
 
 def out_repr(srcip, srcport, destip, dstport, data, direction, ff):
