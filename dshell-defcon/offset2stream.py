@@ -97,7 +97,7 @@ def out_python(srcip, srcport, destip, dstport, data, direction):
     print >>_out_file, "seq.append((%d, idx))" % (idir)
 
 
-def out_begin_pcap(_pkts):
+def out_begin_pcap(_pkts, timestamp):
     import dpkt
     import pcap
     pkts = list(_pkts)
