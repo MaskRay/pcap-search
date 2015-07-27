@@ -104,10 +104,11 @@ get '/api/autocomplete' do
       sug = []
       sock.read.lines.each {|line|
         filename, offset, context = line.chomp.split "\t"
+        offset = offset.to_i
         puts "+ #{filename} #{offset} #{context}"
         IO.popen [File.join(DSHELL_DEFCON, './offset2stream.py'), File.join(PCAP_DIR, filename), offset.to_s, 'loc', File.join(PCAP_DIR, filename.sub(/\.ap$/, '')), '/dev/stdout'] do |h|
           _, y = h.read.split.map(&:to_i)
-          sug << context[0...y-offset.to_i] if y >= offset.to_i
+          sug << context.scan(/(?:\\x(?:..)|[^\\]){,#{[y-offset,context.size].min}}/)[0] if offset < y
         end
       }
       res = {query: q, suggestions: sug }.to_json
@@ -170,54 +171,4 @@ get '/api/search' do
     STDERR.puts e.backtrace
   end
   res
-end
-
-get '/search' do
-  query = Rack::Utils.parse_query request.query_string
-  q = query['q'] || ''
-  page = (query['page'] || 0).to_i
-  offset = page*PER_PAGE
-  result = []
-  total = 0
-
-  begin
-    Timeout.timeout SEARCH_TIMEOUT do
-      sock = Socket.new Socket::AF_UNIX, Socket::SOCK_STREAM, 0
-      sock.connect Socket.pack_sockaddr_un(SEARCH_SOCK)
-      sock.write "#{offset}\0\0\0#{q}"
-      sock.close_write
-      lines = sock.read.lines
-      sock.close
-      total = [lines[-1].to_i, PER_PAGE*MAX_PAGES].min
-      qq = q.gsub(/\\[0-7]{1,3}/) {|match|
-        "\\x#{'%02x' % match[1..-1].to_i(8)}"
-      }
-      .gsub('\\a', '\\x07')
-      .gsub('\\b', '\\x08')
-      .gsub('\\t', '\\x09')
-      .gsub('\\n', '\\x0a')
-      .gsub('\\v', '\\x0b')
-      .gsub('\\f', '\\x0c')
-      .gsub('\\r', '\\x0d')
-      p q, qq
-      result = lines[0..-2].map {|line|
-        filename, offset, context = line.split "\t"
-        offset = offset.to_i
-        context.gsub!(qq) {|match|
-          "<span class=red>#{match}</span>"
-        }
-
-        context.gsub!(/\\x[[:xdigit:]]{2}/) {|match|
-          "<span class=hex>#{match[2..-1]}</span>"
-        }
-
-        {offset: offset, len: q.size, uri: '#', filename: filename, context: context}
-      }
-    end
-  rescue Timeout::Error
-  rescue => e
-    STDERR.puts e.message
-    STDERR.puts e.backtrace
-  end
-  slim :search, locals: {result: result, pages: (total+PER_PAGE-1)/PER_PAGE, page: page, q: q}
 end
