@@ -22,7 +22,7 @@ SEARCH_TIMEOUT = 30
 MAX_PAGES = 30
 PER_PAGE = 20
 DSHELL_DEFCON = File.join __dir__, '..', 'dshell-defcon'
-PCAP_DIR = File.expand_path '/tmp/s'
+PCAP_DIR = File.expand_path '/tmp/n'
 
 # Main
 
@@ -75,7 +75,7 @@ get '/download' do
       attachment "#{filename.sub(/\.cap$/, '')}@#{offset}.cap"
     end
     temp_file = Tempfile.new filename
-    IO.popen [File.join(DSHELL_DEFCON, './offset2stream.py'), File.join(PCAP_DIR, "#{filename}.ap"), offset, type, File.join(PCAP_DIR, filename), temp_file.path] do |h|
+    dshell filename, offset, type, temp_file.path do |h|
       h.read
     end
     Thread.new do
@@ -88,6 +88,10 @@ get '/download' do
   else
     412
   end
+end
+
+def dshell filename, offset, type, out, &block
+  IO.popen([File.join(DSHELL_DEFCON, './offset2stream.py'), File.join(PCAP_DIR, "#{filename}.ap"), offset.to_s, type, File.join(PCAP_DIR, filename), out], &block)
 end
 
 get '/api/autocomplete' do
@@ -104,14 +108,15 @@ get '/api/autocomplete' do
       sug = []
       sock.read.lines.each {|line|
         filename, offset, context = line.chomp.split "\t"
+        filename = filename.sub(/\.ap$/, '')
         offset = offset.to_i
         puts "+ #{filename} #{offset} #{context}"
-        IO.popen [File.join(DSHELL_DEFCON, './offset2stream.py'), File.join(PCAP_DIR, filename), offset.to_s, 'loc', File.join(PCAP_DIR, filename.sub(/\.ap$/, '')), '/dev/stdout'] do |h|
+        dshell filename, offset, 'loc', '/dev/stdout' do |h|
           _, y = h.read.split.map(&:to_i)
           sug << context.scan(/(?:\\x(?:..)|[^\\]){,#{[y-offset,context.size].min}}/)[0] if offset < y
         end
       }
-      res = {query: q, suggestions: sug }.to_json
+      res = {query: q, suggestions: sug.uniq }.to_json
       sock.close
     end
   rescue => e
@@ -150,9 +155,21 @@ get '/api/search' do
       .gsub('\\r', '\\x0d')
       .gsub('\\', '\\x5c')
 
+      re = '(?:\\\\x(?:..)|[^\\\\])'
+      re2 = '(?:(?:..)x\\\\|[^\\\\])'
+
       res = lines[0..-2].map {|line|
-        filename, offset, context = line.chomp.split "\t"
-        {filename: filename.sub(/\.ap$/, ''), offset: offset, context: context}
+        filename, offset, lcontext, body, rcontext = line.chomp.split "\t"
+        filename = filename.sub(/\.ap$/, '')
+        offset = offset.to_i
+        len = body.scan(Regexp.new(re)).size
+        dshell filename, offset, 'loc', '/dev/stdout' do |h|
+          x, y = h.read.split.map &:to_i
+          lcontext = lcontext.reverse.scan(Regexp.new "#{re2}{,#{[offset-x,lcontext.size].min}}")[0].reverse
+          rcontext = rcontext.scan(Regexp.new "#{re}{,#{[y-offset-len,rcontext.size].min}}")[0]
+        end
+
+        {filename: filename.sub(/\.ap$/, ''), offset: offset, context: lcontext+body+rcontext}
       }
       res_grouped = Hash.new {|h,k| h[k] = [] }
       res.each {|x|

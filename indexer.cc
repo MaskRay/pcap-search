@@ -68,7 +68,8 @@ string data_suffix = ".ap";
 string index_suffix = ".fm";
 long autocomplete_limit = 20;
 long autocomplete_length = 20;
-long context_length = 30;
+long lcontext_length = 40;
+long rcontext_length = 30;
 long search_limit = 20;
 long fmindex_sample_rate = 32;
 long rrr_sample_rate = 8;
@@ -1208,6 +1209,9 @@ public:
     return total;
   }
 
+  void autocomplete(const u8 *text, u32 m, const u8 *pattern, u32 limit, vector<u32> &res) const {
+  }
+
   template<typename Archive>
   void serialize(Archive &ar) {
     ar & n_ & samplerate_ & initial_;
@@ -1491,10 +1495,11 @@ void *serve_client(Worker *data)
             auto old_size = res.size();
             string pattern = unescape(len, p);
             total += entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), false, search_limit, skip, res);
-            FOR(i, old_size, res.size()) {
-              dprintf(data->clifd, "%s\t%u\t%s\n", name.c_str(), res[i],
-                      escape(string((char*)entry->mmap+max(res[i]-context_length, 0l), (char*)entry->mmap+min(long(entry->size), res[i]+context_length))).c_str());
-            }
+            FOR(i, old_size, res.size())
+              dprintf(data->clifd, "%s\t%u\t%s\t%s\t%s\n", name.c_str(), res[i],
+                      escape(string((char*)entry->mmap+max(res[i]-lcontext_length, 0l), (char*)entry->mmap+res[i])).c_str(),
+                      escape(pattern).c_str(),
+                      escape(string((char*)entry->mmap+res[i]+len, (char*)entry->mmap+min(long(entry->size), res[i]+rcontext_length))).c_str());
             if (res.size() >= autocomplete_limit) break;
           }
         }
@@ -1759,7 +1764,8 @@ int main(int argc, char *argv[])
       autocomplete_limit = get_long(optarg);
       break;
     case 3:
-      context_length = get_long(optarg);
+      lcontext_length = get_long(optarg);
+      rcontext_length = get_long(optarg);
       break;
     case 4:
       request_timeout_milli = get_long(optarg);
@@ -1811,7 +1817,8 @@ int main(int argc, char *argv[])
     log_status("server mode\n");
     D(autocomplete_length);
     D(autocomplete_limit);
-    D(context_length);
+    D(lcontext_length);
+    D(rcontext_length);
     D(search_limit);
     server_mode(data_dir);
   }
