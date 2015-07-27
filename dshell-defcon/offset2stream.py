@@ -37,6 +37,8 @@ def out_repr(srcip, srcport, destip, dstport, data):
     print >>_out_file, socket.inet_ntoa(struct.pack('I', destip)) + ':' + str(dstport),
     print >>_out_file, '(%d bytes)' % len(data)
     print >>_out_file, repr(data)
+    print >>_out_file, "--------------------------------------------"
+
 
 def out_hex(srcip, srcport, destip, dstport, data):
     print >>_out_file, socket.inet_ntoa(struct.pack('I', srcip)) + ':' + str(srcport),
@@ -45,6 +47,7 @@ def out_hex(srcip, srcport, destip, dstport, data):
     print >>_out_file, '(%d bytes)' % len(data)
     enc_data = data.encode('hex')
     print >>_out_file, ' '.join([enc_data[j:j+2] for j in xrange(0, len(enc_data), 2)])
+    print >>_out_file, "--------------------------------------------"
 
 
 def out_str(srcip, srcport, destip, dstport, data):
@@ -53,6 +56,7 @@ def out_str(srcip, srcport, destip, dstport, data):
     print >>_out_file, socket.inet_ntoa(struct.pack('I', destip)) + ':' + str(dstport),
     print >>_out_file, '(%d bytes)' % len(data)
     print >>_out_file, str(data)
+    print >>_out_file, "--------------------------------------------"
 
 def out_begin_pcap(_pkts):
     import dpkt
