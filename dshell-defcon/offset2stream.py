@@ -4,6 +4,7 @@ import re
 import sys
 import struct
 import socket
+import time
 
 ff = open(sys.argv[1], 'rb')
 offset = int(sys.argv[2])
@@ -23,6 +24,7 @@ out_end_repr = out_end_hex = out_end_str
 def out_begin_hex(*args):
     global _out_file
     _out_file = open(sys.argv[5], 'wb')
+    print >>_out_file, 'Time: ', time.ctime(args[1])
 out_begin_str = out_begin_repr = out_begin_hex
 
 
@@ -60,7 +62,8 @@ def out_str(srcip, srcport, destip, dstport, data, direction):
 
 
 def out_begin_python(*args):
-    out_begin_hex()
+    global _out_file
+    _out_file = open(sys.argv[5], 'wb')
     print >>_out_file, '#!/usr/bin/env python2'
     print >>_out_file, '#-*- coding:utf-8 -*-'
     print >>_out_file, 'try: from termcolor import colored'
@@ -120,10 +123,10 @@ for i in len_conns:
     if current_offset <= offset < current_offset + i:
         found = True
         ff.seek(current_offset, 0)
-        len_pkt, cliip, servip, cliport, servport = struct.unpack('IIIHH', ff.read(16))
+        len_pkt, cliip, servip, cliport, servport, timestamp = struct.unpack('IIIHHI', ff.read(20))
         cnt_pkt = struct.unpack('I', ff.read(4))[0]
         pkts_id = struct.unpack('I' * cnt_pkt, ff.read(4 * cnt_pkt))
-        out_begin(pkts_id)
+        out_begin(pkts_id, timestamp)
         for i in xrange(len_pkt):
             direction = ff.read(1)
             len_data = struct.unpack('I', ff.read(4))[0]

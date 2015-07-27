@@ -49,7 +49,7 @@
     font-width: bold;
     color: red;
   }
-  code.hex, code.repr, code.str{
+  code.hex, code.repr, code.str, code.python{
     overflow-x: scroll;
     white-space: pre-wrap;
     break-word: break-all;
@@ -198,6 +198,41 @@
         </div>
       </div>
       <textarea class="hidden"></textarea>
+      <div class="ui big modal">
+        <i class="close icon"></i>
+        <div class="header">View</div>
+        <div class='content'>
+          <div class="ui top attached tabular menu">
+            <a class="active item" data-tab="first">Hex</a>
+            <a class="item" data-tab="second">repr</a>
+            <a class="item" data-tab="third">String</a>
+            <a class="item" data-tab="fourth">Python</a>
+          </div>
+          <div class="ui bottom attached active tab segment" data-tab="first">
+            <code class="hex">
+              <div each={i,j in hex}>{i}</div>
+            </code>
+          </div>
+          <div class="ui bottom attached tab segment" data-tab="second">
+            <code class="repr">
+              <div each={i,j in repr}>{i}</div>
+            </code>
+          </div>
+          <div class="ui bottom attached tab segment" data-tab="third">
+            <code class="str">
+              <div each={i,j in str}>{i}</div>
+            </code>
+          </div>
+          <div class="ui bottom attached tab segment" data-tab="fourth">
+            <code class="python">
+              <div each={i,j in python}>{i}</div>
+            </code>
+          </div>
+        </div>
+        <div class="actions">
+          <div class="ui close button">OK</div>
+        </div>
+      </div>
       this.on('mount', function(){
         // init the search
         this.pages = {}
@@ -254,8 +289,8 @@
         // clean the original data
         this.hex = '';
         this.repr = '';
-        this.str = "";
-        this.python = "";
+        this.str = '';
+        this.python = '';
         // fetch the data
         this.loading = true
         this.update() // animate
@@ -275,6 +310,10 @@
         }.bind(this), 'text')
         $.get(this.download(file, offset, 'str'), {}, function(response){
           this.str = response.split("--------------------------------------------\n")
+          this.update()
+        }.bind(this), 'text')
+        $.get(this.download(file, offset, 'python'), {}, function(response){
+          this.python = response.split("--------------------------------------------\n")
           this.update()
         }.bind(this), 'text')
       }
