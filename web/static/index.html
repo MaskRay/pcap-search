@@ -198,41 +198,6 @@
         </div>
       </div>
       <textarea class="hidden"></textarea>
-      <div class="ui big modal">
-        <i class="close icon"></i>
-        <div class="header">View</div>
-        <div class='content'>
-          <div class="ui top attached tabular menu">
-            <a class="active item" data-tab="first">Hex</a>
-            <a class="item" data-tab="second">repr</a>
-            <a class="item" data-tab="third">String</a>
-            <a class="item" data-tab="fourth">Python</a>
-          </div>
-          <div class="ui bottom attached active tab segment" data-tab="first">
-            <code class="hex">
-              <div each={i,j in hex}>{i}</div>
-            </code>
-          </div>
-          <div class="ui bottom attached tab segment" data-tab="second">
-            <code class="repr">
-              <div each={i,j in repr}>{i}</div>
-            </code>
-          </div>
-          <div class="ui bottom attached tab segment" data-tab="third">
-            <code class="str">
-              <div each={i,j in str}>{i}</div>
-            </code>
-          </div>
-          <div class="ui bottom attached tab segment" data-tab="fourth">
-            <code class="python">
-              <div each={i,j in python}>{i}</div>
-            </code>
-          </div>
-        </div>
-        <div class="actions">
-          <div class="ui close button">OK</div>
-        </div>
-      </div>
       this.on('mount', function(){
         // init the search
         this.pages = {}
