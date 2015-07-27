@@ -101,10 +101,21 @@ get '/api/autocomplete' do
       sock.connect Socket.pack_sockaddr_un(SEARCH_SOCK)
       sock.write "\0\0\0#{q}"
       sock.close_write
-      res = {query: q, suggestions: sock.read.lines.map(&:chomp) }.to_json
+      sug = []
+      sock.read.lines.each {|line|
+        filename, offset, context = line.chomp.split "\t"
+        puts "+ #{filename} #{offset} #{context}"
+        IO.popen [File.join(DSHELL_DEFCON, './offset2stream.py'), File.join(PCAP_DIR, filename), offset.to_s, 'loc', File.join(PCAP_DIR, filename.sub(/\.ap$/, '')), '/dev/stdout'] do |h|
+          _, y = h.read.split.map(&:to_i)
+          sug << context[0...y-offset.to_i] if y >= offset.to_i
+        end
+      }
+      res = {query: q, suggestions: sug }.to_json
       sock.close
     end
-  rescue
+  rescue => e
+    STDERR.puts e.message
+    STDERR.puts e.backtrace
   end
   res
 end

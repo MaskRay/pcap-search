@@ -31,6 +31,7 @@
 #include <sys/time.h>
 #include <sys/un.h>
 #include <sysexits.h>
+#include <tuple>
 #include <type_traits>
 #include <unistd.h>
 #include <utility>
@@ -1455,9 +1456,10 @@ void *serve_client(Worker *data)
     bool autocomplete = *search_type == '\0';
     u32 len = buf+nread-p, total = 0, t;
     if (autocomplete) {
+      typedef tuple<string, u32, string> cand_type;
       u32 skip = 0;
       vector<u32> res;
-      vector<string> candidates;
+      vector<cand_type> candidates;
       for (auto &ne: make_reverse_iterator(data->name2entry)) {
         const string &name = ne.first;
         auto entry = ne.second;
@@ -1466,14 +1468,16 @@ void *serve_client(Worker *data)
           string pattern = unescape(len, p);
           entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), true, autocomplete_limit, skip, res);
           FOR(i, old_size, res.size())
-            candidates.emplace_back((char*)entry->mmap+res[i], (char*)entry->mmap+min(long(entry->size), res[i]+len+autocomplete_length));
+            candidates.emplace_back(name, res[i], string((char*)entry->mmap+res[i], (char*)entry->mmap+min(long(entry->size), res[i]+len+autocomplete_length)));
           if (res.size() >= autocomplete_limit) break;
         }
       }
       sort(candidates.begin(), candidates.end());
-      candidates.erase(unique(candidates.begin(), candidates.end()), candidates.end());
+      candidates.erase(unique(candidates.begin(), candidates.end(), [](const cand_type &x, const cand_type &y) {
+                              return get<2>(x) == get<2>(y);
+                              }), candidates.end());
       for (auto &cand: candidates)
-        dprintf(data->clifd, "%s\n", escape(cand).c_str()); // may SIGPIPE
+        dprintf(data->clifd, "%s\t%u\t%s\n", get<0>(cand).c_str(), get<1>(cand), escape(get<2>(cand)).c_str()); // may SIGPIPE
     } else {
       char *end;
       errno = 0;
@@ -1521,6 +1525,7 @@ void server_mode(const string &data_dir)
       close(old->fd);
       close(old->index_fd);
       name2entry.erase(name);
+      log_action("removed %s\n", name.c_str());
     }
   };
 
