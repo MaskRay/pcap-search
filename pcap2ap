@@ -2,14 +2,18 @@
 set -e -u
 setopt nullglob
 
+program=$0
 dshell_defcon=${0:a:h}/dshell-defcon
 
 usage() {
   cat <<e
-Usage: ${0##*/} dir
+Usage: ${program##*/} dir
 Transform .cap files into .ap files
+
+Options:
+  -p max-procs   Run up to max-procs dshell-decode at a time (currently by detecting python2 processes, inaccurate)
 e
-  exit
+  exit $1
 }
 
 log_generic() {
@@ -21,31 +25,44 @@ log_action() { tput setaf 2; log_generic "$@"; tput sgr0 }
 log_status() { tput setaf 3; log_generic "$@"; tput sgr0 }
 log_event() { tput setaf 6; log_generic "$@"; tput sgr0 }
 
+semaphore() {
+  seq $parallel
+  while read; do
+    echo
+  done
+}
+
 process() {
   filename=$1
   if [[ $filename =~ '\.cap$' ]]; then
     log_status found $filename
     (
+      read -p
       start=$(date +%s.%N)
-      $dshell_defcon/dshell-decode -d stream2dump --stream2dump_outfiles=$PWD/$filename.ap $PWD/$filename >/dev/null
+      $dshell_defcon/dshell-decode -d stream2dump --stream2dump_outfiles=$filename.ap $filename >/dev/null
       stop=$(date +%s.%N)
       log_action created .ap for $filename, size: $(stat -c %s $filename), used $(bc -l<<<"scale=3;($stop-$start)/1") s
+      print -p
     ) &
   fi
 }
 
+parallel=$(nproc)
 while getopts h opt; do
   case $opt; in
-    h) usage;;
+    h) usage 0;;
+    p) parallel=$OPTIND;;
     \?) exit;;
   esac
 done
 
 dir=${1:-}
 if [[ -z $dir ]]; then
-  usage
+  usage 1
 fi
 cd $dir
+
+coproc semaphore
 
 log_status processing $dir
 
