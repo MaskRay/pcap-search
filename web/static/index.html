@@ -36,7 +36,7 @@
   code.code{
     background-color: #FFEEEE;
     display: inline;
-    word-wrap: pre;
+    word-break: break-all;
   }
   .line-number{
     font-weight: bold;
@@ -52,7 +52,18 @@
   code.hex, code.repr, code.str{
     overflow-x: scroll;
     white-space: pre-wrap;
+    break-word: break-all;
     display: block !important;
+  }
+  code div:nth-child(2n){
+    background-color: #dfd;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  code div:nth-child(2n+1){
+    background-color: #FFA3A3;
+    white-space: pre-wrap;
+    word-break: break-all;
   }
   </style>
   <link rel="stylesheet" href="/semantic.min.css">
@@ -91,7 +102,7 @@
           </div>
         </div>
       </div>
-      <div class="ui one column grid container resultBox" onscroll={scroll}>
+      <div class="ui one column grid container resultBox" onscroll={fetch}>
         <div each={n, page in pages} class="ui column" id={'page'+n}>
           <h2 class="ui centered inverted header">
             <div class="">Page {n}</div>
@@ -107,7 +118,7 @@
                     <a class="ui button" href={download(file, offset, 'pcap')} target="_blank">PCAP</a>
                     <div class="ui button" onclick={open.bind(this, file, offset)}>View</div>
                   </div>
-                  <div class="content">
+                  <div class="middle aligned content">
                     <span class="line-number">{offset}</span><code class="code"><span class={keyword: i[0]} each={i,j in find(context)}>{i[1]}</span></code>
                   </div>
                 </div>
@@ -116,23 +127,29 @@
           </div>
         </div>
       </div>
-      <div class="ui modal">
+      <div class="ui big modal">
         <i class="close icon"></i>
         <div class="header">View</div>
         <div class='content'>
           <div class="ui top attached tabular menu">
             <a class="active item" data-tab="first">Hex</a>
-            <a class="item" data-tab="second">Hex</a>
+            <a class="item" data-tab="second">repr</a>
             <a class="item" data-tab="third">String</a>
           </div>
           <div class="ui bottom attached active tab segment" data-tab="first">
-            <code class="hex">{hex}</code>
+            <code class="hex">
+              <div each={i,j in hex}>{i}</div>
+            </code>
           </div>
           <div class="ui bottom attached tab segment" data-tab="second">
-            <code class="repr">{repr}</code>
+            <code class="repr">
+              <div each={i,j in repr}>{i}</div>
+            </code>
           </div>
           <div class="ui bottom attached tab segment" data-tab="third">
-            <code class="str">{str}</code>
+            <code class="str">
+              <div each={i,j in str}>{i}</div>
+            </code>
           </div>
         </div>
         <div class="actions">
@@ -174,7 +191,7 @@
       small(){
         $('body').removeClass('none')
       }
-      scroll(e){
+      fetch(e){
         console.log(e)
       }
       open(file, offset){
@@ -186,18 +203,17 @@
         this.loading = true
         this.update() // animate
         $.get(this.download(file, offset, "hex"), {},function(response){
-          console.log(response)
           this.loading = false // now we can show a modal
-          this.hex = response
+          this.hex = response.split("--------------------------------------------\n")
           this.update()
           $('.ui.modal').modal('show');
         }.bind(this), 'text') // hex is default
         $.get(this.download(file, offset, 'repr'), {}, function(response){
-          this.repr = response
+          this.repr = response.split("--------------------------------------------\n")
           this.update()
         }.bind(this), 'text')
         $.get(this.download(file, offset, 'str'), {}, function(response){
-          this.str = response
+          this.str = response.split("--------------------------------------------\n")
           this.update()
         }.bind(this), 'text')
       }
