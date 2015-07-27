@@ -68,8 +68,12 @@ get '/download' do
     content_type 'application/vnd.tcpdump.pcap'
     attachment filename
     send_file File.join(PCAP_DIR, filename)
-  when 'pcap', 'str', 'hex', 'repr'
+  when 'pcap', 'str', 'hex', 'repr', 'python'
     return 412 unless offset
+    if type == 'pcap'
+      content_type 'application/vnd.tcpdump.pcap'
+      attachment "#{filename.sub(/\.cap$/, '')}@#{offset}.cap"
+    end
     temp_file = Tempfile.new filename
     IO.popen [File.join(DSHELL_DEFCON, './offset2stream.py'), File.join(PCAP_DIR, "#{filename}.ap"), offset, type, File.join(PCAP_DIR, filename), temp_file.path] do |h|
       h.read

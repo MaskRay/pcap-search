@@ -65,12 +65,14 @@ const size_t BUF_SIZE = 512;
 const char LISTEN_PATH[] = "/tmp/search.sock";
 const string PCAP_SUFFIX = ".ap";
 const string INDEX_SUFFIX = ".fm";
-const int SAMPLE_RATE = 32;
-const int SEARCH_LIMIT = 20;
-const int AUTOCOMPLETE_LIMIT = 20;
-const int AUTOCOMPLETE_LENGTH = 20;
-const int CONTEXT_LENGTH = 30;
-const long REQUEST_TIMEOUT_MILLI = 1000;
+
+long autocomplete_limit = 20;
+long autocomplete_length = 20;
+long context_length = 30;
+long search_limit = 20;
+long fmindex_sample_rate = 32;
+long rrr_sample_rate = 8;
+long request_timeout_milli = 1000;
 
 ///// log
 
@@ -126,11 +128,107 @@ public:
   }
 };
 
+///// error
+
+static const char *ENAME[] = {
+    /*   0 */ "",
+    /*   1 */ "EPERM", "ENOENT", "ESRCH", "EINTR", "EIO", "ENXIO",
+    /*   7 */ "E2BIG", "ENOEXEC", "EBADF", "ECHILD",
+    /*  11 */ "EAGAIN/EWOULDBLOCK", "ENOMEM", "EACCES", "EFAULT",
+    /*  15 */ "ENOTBLK", "EBUSY", "EEXIST", "EXDEV", "ENODEV",
+    /*  20 */ "ENOTDIR", "EISDIR", "EINVAL", "ENFILE", "EMFILE",
+    /*  25 */ "ENOTTY", "ETXTBSY", "EFBIG", "ENOSPC", "ESPIPE",
+    /*  30 */ "EROFS", "EMLINK", "EPIPE", "EDOM", "ERANGE",
+    /*  35 */ "EDEADLK/EDEADLOCK", "ENAMETOOLONG", "ENOLCK", "ENOSYS",
+    /*  39 */ "ENOTEMPTY", "ELOOP", "", "ENOMSG", "EIDRM", "ECHRNG",
+    /*  45 */ "EL2NSYNC", "EL3HLT", "EL3RST", "ELNRNG", "EUNATCH",
+    /*  50 */ "ENOCSI", "EL2HLT", "EBADE", "EBADR", "EXFULL", "ENOANO",
+    /*  56 */ "EBADRQC", "EBADSLT", "", "EBFONT", "ENOSTR", "ENODATA",
+    /*  62 */ "ETIME", "ENOSR", "ENONET", "ENOPKG", "EREMOTE",
+    /*  67 */ "ENOLINK", "EADV", "ESRMNT", "ECOMM", "EPROTO",
+    /*  72 */ "EMULTIHOP", "EDOTDOT", "EBADMSG", "EOVERFLOW",
+    /*  76 */ "ENOTUNIQ", "EBADFD", "EREMCHG", "ELIBACC", "ELIBBAD",
+    /*  81 */ "ELIBSCN", "ELIBMAX", "ELIBEXEC", "EILSEQ", "ERESTART",
+    /*  86 */ "ESTRPIPE", "EUSERS", "ENOTSOCK", "EDESTADDRREQ",
+    /*  90 */ "EMSGSIZE", "EPROTOTYPE", "ENOPROTOOPT",
+    /*  93 */ "EPROTONOSUPPORT", "ESOCKTNOSUPPORT",
+    /*  95 */ "EOPNOTSUPP/ENOTSUP", "EPFNOSUPPORT", "EAFNOSUPPORT",
+    /*  98 */ "EADDRINUSE", "EADDRNOTAVAIL", "ENETDOWN", "ENETUNREACH",
+    /* 102 */ "ENETRESET", "ECONNABORTED", "ECONNRESET", "ENOBUFS",
+    /* 106 */ "EISCONN", "ENOTCONN", "ESHUTDOWN", "ETOOMANYREFS",
+    /* 110 */ "ETIMEDOUT", "ECONNREFUSED", "EHOSTDOWN", "EHOSTUNREACH",
+    /* 114 */ "EALREADY", "EINPROGRESS", "ESTALE", "EUCLEAN",
+    /* 118 */ "ENOTNAM", "ENAVAIL", "EISNAM", "EREMOTEIO", "EDQUOT",
+    /* 123 */ "ENOMEDIUM", "EMEDIUMTYPE", "ECANCELED", "ENOKEY",
+    /* 127 */ "EKEYEXPIRED", "EKEYREVOKED", "EKEYREJECTED",
+    /* 130 */ "EOWNERDEAD", "ENOTRECOVERABLE", "ERFKILL", "EHWPOISON"
+};
+
+#define MAX_ENAME 133
+
+void output_error(bool use_err, const char *format, va_list ap)
+{
+  char text[BUF_SIZE], msg[BUF_SIZE], buf[BUF_SIZE];
+  vsnprintf(msg, BUF_SIZE, format, ap);
+  if (use_err)
+    snprintf(text, BUF_SIZE, "[%s %s] ", 0 < errno && errno < MAX_ENAME ? ENAME[errno] : "?UNKNOWN?", strerror(errno));
+  else
+    strcpy(text, "");
+  snprintf(buf, BUF_SIZE, RED "%s%s\n", text, msg);
+  fputs(buf, stderr);
+  fputs(SGR0, stderr);
+  fflush(stderr);
+}
+
+void err_msg(const char *format, ...)
+{
+  va_list ap;
+  va_start(ap, format);
+  int saved = errno;
+  output_error(errno > 0, format, ap);
+  errno = saved;
+  va_end(ap);
+}
+
+void err_exit(int exitno, const char *format, ...)
+{
+  va_list ap;
+  va_start(ap, format);
+  int saved = errno;
+  output_error(errno > 0, format, ap);
+  errno = saved;
+  va_end(ap);
+
+  void *bt[99];
+  char buf[1024];
+  int nptrs = backtrace(bt, LEN_OF(buf));
+  int i = sprintf(buf, "addr2line -Cfipe %s", program_invocation_name), j = 0;
+  while (j < nptrs && i+30 < sizeof buf)
+    i += sprintf(buf+i, " %#x", bt[j++]);
+  strcat(buf, ">&2");
+  fputs("\n", stderr);
+  system(buf);
+  //backtrace_symbols_fd(buf, nptrs, STDERR_FILENO);
+  exit(exitno);
+}
+
 ///// common
 
 u32 clog2(u32 x)
 {
   return x > 1 ? 32-__builtin_clz(x-1) : 0;
+}
+
+long get_long(const char *arg)
+{
+  char *end;
+  errno = 0;
+  long ret = strtol(arg, &end, 0);
+  if (errno)
+    err_exit(EX_USAGE, "get_long: %s", arg);
+  if (*end)
+    err_exit(EX_USAGE, "get_long: nonnumeric character");
+  return ret;
 }
 
 string escape(const string &str)
@@ -314,6 +412,13 @@ public:
 
   u32 size() const {
     return n_;
+  }
+
+  u32 popcount() const {
+    u32 r = 0;
+    REP(i, a_.size())
+      r += __builtin_popcountll(a_[i]);
+    return r;
   }
 
   template<typename Archive>
@@ -673,7 +778,7 @@ public:
   void init(u32 n, u32 block_len, u32 sample_len, const BitSet &data) {
     n_ = n;
     block_len_ = block_len ? block_len : max(clog2(n), u32(15));
-    sample_len_ = sample_len ? sample_len : 8;
+    sample_len_ = sample_len ? sample_len : rrr_sample_rate;
     compute_tables();
     build(data);
   }
@@ -683,7 +788,9 @@ public:
     rank_sum_ = 0;
     u32 offset_sum = 0;
     REP(i, nblocks_) {
-      u32 klass = __builtin_popcountll(data.block(block_len_, i));
+      u32 o = block_len_*i, ol = min(block_len_, n_-o);
+      u64 val = data.get_bits(o, ol);
+      u32 klass = __builtin_popcountll(val);
       rank_sum_ += klass;
       offset_sum += offset_bits_[klass];
     }
@@ -702,10 +809,12 @@ public:
         rank_samples_.set_bits(i/sample_len_*rsample_bits_, rsample_bits_, rank_sum_);
         offset_samples_.set_bits(i/sample_len_*osample_bits_, osample_bits_, offset_sum);
       }
-      u32 klass = __builtin_popcountll(data.block(block_len_, i));
+      u32 o = block_len_*i, ol = min(block_len_, n_-o);
+      u64 val = data.get_bits(o, ol);
+      u32 klass = __builtin_popcountll(val);
       klasses_.set_bits(klass_bits_*i, klass_bits_, klass);
       rank_sum_ += klass;
-      offsets_.set_bits(offset_sum, offset_bits_[klass], block2offset(klass, data.block(block_len_, i)));
+      offsets_.set_bits(offset_sum, offset_bits_[klass], block2offset(klass, val));
       offset_sum += offset_bits_[klass];
     }
   }
@@ -1090,11 +1199,11 @@ public:
   }
   int at(int d, int l, int h, u32 i) const {
     if (h-l == 1) return l;
-    int m = l + (1 << 31-__builtin_clz(h-l-1));
-    //return ! (*b_[d])[i]
+    int m = l+h >> 1;
+    u32 z = rrr_[d].zero_bits();
     return ! rrr_[d][i]
       ? at(d+1, l, m, rrr_[d].rank0(i))
-      : at(d+1, m, h, rrr_[d].zero_bits()+rrr_[d].rank1(i));
+      : at(d+1, m, h, z+rrr_[d].rank1(i));
   }
 
   // number of occurrences of symbol `x` in [0,i)
@@ -1115,7 +1224,7 @@ public:
   }
   u32 select(int d, int l, int h, u32 x, u32 k, u32 p) const {
     if (l == h-1) return p+k;
-    int m = l + (1 << 31-__builtin_clz(h-l-1));
+    int m = l+h >> 1;
     u32 z = rrr_[d].zero_bits();
     return x < m
       ? rrr_[d].select0(select(d+1, l, m, x, k, rrr_[d].rank0(p)))
@@ -1388,90 +1497,6 @@ void print_help(FILE *fh)
   exit(fh == stdout ? 0 : EX_USAGE);
 }
 
-///// error
-
-static const char *ENAME[] = {
-    /*   0 */ "",
-    /*   1 */ "EPERM", "ENOENT", "ESRCH", "EINTR", "EIO", "ENXIO",
-    /*   7 */ "E2BIG", "ENOEXEC", "EBADF", "ECHILD",
-    /*  11 */ "EAGAIN/EWOULDBLOCK", "ENOMEM", "EACCES", "EFAULT",
-    /*  15 */ "ENOTBLK", "EBUSY", "EEXIST", "EXDEV", "ENODEV",
-    /*  20 */ "ENOTDIR", "EISDIR", "EINVAL", "ENFILE", "EMFILE",
-    /*  25 */ "ENOTTY", "ETXTBSY", "EFBIG", "ENOSPC", "ESPIPE",
-    /*  30 */ "EROFS", "EMLINK", "EPIPE", "EDOM", "ERANGE",
-    /*  35 */ "EDEADLK/EDEADLOCK", "ENAMETOOLONG", "ENOLCK", "ENOSYS",
-    /*  39 */ "ENOTEMPTY", "ELOOP", "", "ENOMSG", "EIDRM", "ECHRNG",
-    /*  45 */ "EL2NSYNC", "EL3HLT", "EL3RST", "ELNRNG", "EUNATCH",
-    /*  50 */ "ENOCSI", "EL2HLT", "EBADE", "EBADR", "EXFULL", "ENOANO",
-    /*  56 */ "EBADRQC", "EBADSLT", "", "EBFONT", "ENOSTR", "ENODATA",
-    /*  62 */ "ETIME", "ENOSR", "ENONET", "ENOPKG", "EREMOTE",
-    /*  67 */ "ENOLINK", "EADV", "ESRMNT", "ECOMM", "EPROTO",
-    /*  72 */ "EMULTIHOP", "EDOTDOT", "EBADMSG", "EOVERFLOW",
-    /*  76 */ "ENOTUNIQ", "EBADFD", "EREMCHG", "ELIBACC", "ELIBBAD",
-    /*  81 */ "ELIBSCN", "ELIBMAX", "ELIBEXEC", "EILSEQ", "ERESTART",
-    /*  86 */ "ESTRPIPE", "EUSERS", "ENOTSOCK", "EDESTADDRREQ",
-    /*  90 */ "EMSGSIZE", "EPROTOTYPE", "ENOPROTOOPT",
-    /*  93 */ "EPROTONOSUPPORT", "ESOCKTNOSUPPORT",
-    /*  95 */ "EOPNOTSUPP/ENOTSUP", "EPFNOSUPPORT", "EAFNOSUPPORT",
-    /*  98 */ "EADDRINUSE", "EADDRNOTAVAIL", "ENETDOWN", "ENETUNREACH",
-    /* 102 */ "ENETRESET", "ECONNABORTED", "ECONNRESET", "ENOBUFS",
-    /* 106 */ "EISCONN", "ENOTCONN", "ESHUTDOWN", "ETOOMANYREFS",
-    /* 110 */ "ETIMEDOUT", "ECONNREFUSED", "EHOSTDOWN", "EHOSTUNREACH",
-    /* 114 */ "EALREADY", "EINPROGRESS", "ESTALE", "EUCLEAN",
-    /* 118 */ "ENOTNAM", "ENAVAIL", "EISNAM", "EREMOTEIO", "EDQUOT",
-    /* 123 */ "ENOMEDIUM", "EMEDIUMTYPE", "ECANCELED", "ENOKEY",
-    /* 127 */ "EKEYEXPIRED", "EKEYREVOKED", "EKEYREJECTED",
-    /* 130 */ "EOWNERDEAD", "ENOTRECOVERABLE", "ERFKILL", "EHWPOISON"
-};
-
-#define MAX_ENAME 133
-
-void output_error(bool use_err, const char *format, va_list ap)
-{
-  char text[BUF_SIZE], msg[BUF_SIZE], buf[BUF_SIZE];
-  vsnprintf(msg, BUF_SIZE, format, ap);
-  if (use_err)
-    snprintf(text, BUF_SIZE, "[%s %s] ", 0 < errno && errno < MAX_ENAME ? ENAME[errno] : "?UNKNOWN?", strerror(errno));
-  else
-    strcpy(text, "");
-  snprintf(buf, BUF_SIZE, RED "%s%s\n", text, msg);
-  fputs(buf, stderr);
-  fputs(SGR0, stderr);
-  fflush(stderr);
-}
-
-void err_msg(const char *format, ...)
-{
-  va_list ap;
-  va_start(ap, format);
-  int saved = errno;
-  output_error(errno > 0, format, ap);
-  errno = saved;
-  va_end(ap);
-}
-
-void err_exit(int exitno, const char *format, ...)
-{
-  va_list ap;
-  va_start(ap, format);
-  int saved = errno;
-  output_error(errno > 0, format, ap);
-  errno = saved;
-  va_end(ap);
-
-  void *bt[99];
-  char buf[1024];
-  int nptrs = backtrace(bt, LEN_OF(buf));
-  int i = sprintf(buf, "addr2line -Cfipe %s", program_invocation_name), j = 0;
-  while (j < nptrs && i+30 < sizeof buf)
-    i += sprintf(buf+i, " %#x", bt[j++]);
-  strcat(buf, ">&2");
-  fputs("\n", stderr);
-  system(buf);
-  //backtrace_symbols_fd(buf, nptrs, STDERR_FILENO);
-  exit(exitno);
-}
-
 jmp_buf jmpbuf;
 
 struct Entry
@@ -1547,19 +1572,16 @@ struct Worker
 {
   int clifd;
   map<string, shared_ptr<Entry>> name2entry;
-  u32 search_limit;
 };
 
-//void *serve_client(int clifd, const map<string, Entry> *name2entry, u32 search_limit)
 void *serve_client(Worker *data)
-//int clifd, const map<string, Entry> *name2entry, u32 search_limit)
 {
   char buf[BUF_SIZE];
   const char *p, *search_type = buf, *file_begin = buf, *file_end = nullptr;
   int nread = 0;
   timeval timeout;
-  timeout.tv_sec = REQUEST_TIMEOUT_MILLI/1000;
-  timeout.tv_usec = REQUEST_TIMEOUT_MILLI%1000*1000;
+  timeout.tv_sec = request_timeout_milli/1000;
+  timeout.tv_usec = request_timeout_milli%1000*1000;
 
   for(;;) {
     fd_set rfds;
@@ -1603,10 +1625,10 @@ void *serve_client(Worker *data)
         if (entry->valid && entry->size > 0) {
           auto old_size = res.size();
           string pattern = unescape(len, p);
-          entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), true, AUTOCOMPLETE_LIMIT, skip, res);
+          entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), true, autocomplete_limit, skip, res);
           FOR(i, old_size, res.size())
-            candidates.emplace_back((char*)entry->mmap+res[i], (char*)entry->mmap+min(entry->size, int(res[i])+AUTOCOMPLETE_LENGTH));
-          if (res.size() >= AUTOCOMPLETE_LIMIT) break;
+            candidates.emplace_back((char*)entry->mmap+res[i], (char*)entry->mmap+min(long(entry->size), res[i]+autocomplete_length));
+          if (res.size() >= autocomplete_limit) break;
         }
       }
       sort(candidates.begin(), candidates.end());
@@ -1625,12 +1647,12 @@ void *serve_client(Worker *data)
           if (entry->valid && (! *file_begin || string(file_begin) <= name) && (! *file_end || name <= string(file_end)) && entry->size > 0) {
             auto old_size = res.size();
             string pattern = unescape(len, p);
-            total += entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), false, data->search_limit, skip, res);
+            total += entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), false, search_limit, skip, res);
             FOR(i, old_size, res.size()) {
               dprintf(data->clifd, "%s\t%u\t%s\n", name.c_str(), res[i],
-                      escape(string((char*)entry->mmap+max(int(res[i])-CONTEXT_LENGTH, 0), (char*)entry->mmap+min(entry->size, int(res[i])+CONTEXT_LENGTH))).c_str());
+                      escape(string((char*)entry->mmap+max(res[i]-context_length, 0l), (char*)entry->mmap+min(long(entry->size), res[i]+context_length))).c_str());
             }
-            if (res.size() >= AUTOCOMPLETE_LIMIT) break;
+            if (res.size() >= autocomplete_limit) break;
           }
         }
         dprintf(data->clifd, "%u\n", total);
@@ -1639,11 +1661,11 @@ void *serve_client(Worker *data)
   }
 quit:
   close(data->clifd);
-  free(data);
+  delete data;
   return NULL;
 }
 
-void server_mode(const string &pcap_dir, u32 search_limit)
+void server_mode(const string &pcap_dir)
 {
   signal(SIGPIPE, SIG_IGN);
 
@@ -1759,7 +1781,6 @@ quit:
       auto worker = new Worker;
       worker->clifd = clifd;
       worker->name2entry = name2entry; // make a copy of name2entry to prevent race condition
-      worker->search_limit = search_limit;
       pthread_create(&tid, &attr, (void*(*)(void*))serve_client, worker);
       pthread_attr_destroy(&attr);
     }
@@ -1812,7 +1833,7 @@ void index_mode(const string &pcap_dir, bool do_inotify)
         err_exit(EX_IOERR, "fputs");
       Serializer ar(fh);
       FMIndex fm;
-      fm.init(pcap_size, (const u8 *)pcap_content, SAMPLE_RATE);
+      fm.init(pcap_size, (const u8 *)pcap_content, fmindex_sample_rate);
       ar & fm;
       long index_size = ftell(fh);
       ftruncate(index_fd, index_size);
@@ -1938,38 +1959,51 @@ int main(int argc, char *argv[])
 
   bool is_index_mode = false;
   bool do_inotify = true;
-  u32 search_limit = SEARCH_LIMIT;
 
   int opt;
   static struct option long_options[] = {
-    {"oneshot",     no_argument, 0,   'o'},
-    {"limit",       required_argument, 0,   'l'},
-    {"index",       no_argument, 0,   'i'},
-    {"help",        no_argument, 0,   'h'},
-    {0,             0,           0,   0}
+    {"autocomplete-length", required_argument, 0,   1},
+    {"autocomplete-limit",  required_argument, 0,   2},
+    {"context-length",      no_argument,       0,   3},
+    {"fmindex-sample-rate", required_argument, 0,   'f'},
+    {"oneshot",             no_argument,       0,   'o'},
+    {"limit",               required_argument, 0,   'l'},
+    {"index",               no_argument,       0,   'i'},
+    {"help",                no_argument,       0,   'h'},
+    {"request-timeout",     required_argument, 0,   3},
+    {"rrr-sample-rate",     required_argument, 0,   'r'},
+    {"sample-rate",         required_argument, 0,   's'},
+    {0,                     0,                 0,   0},
   };
 
-  while ((opt = getopt_long(argc, argv, "hil:o", long_options, NULL)) != -1) {
+  while ((opt = getopt_long(argc, argv, "f:hil:or:", long_options, NULL)) != -1) {
     switch (opt) {
+    case 1:
+      autocomplete_length = get_long(optarg);
+      break;
+    case 2:
+      autocomplete_limit = get_long(optarg);
+      break;
+    case 3:
+      context_length = get_long(optarg);
+      break;
+    case 'f':
+      fmindex_sample_rate = get_long(optarg);
+      break;
     case 'h':
       print_help(stdout);
       break;
     case 'i':
       is_index_mode = true;
       break;
-    case 'l': {
-      char *end;
-      errno = 0;
-      long t = strtol(optarg, &end, 0);
-      if (errno)
-        err_exit(EX_USAGE, "limit is too large");
-      if (*end || t < 0 || t > UINT32_MAX)
-        err_exit(EX_USAGE, "invalid limit");
-      search_limit = t;
+    case 'l':
+      search_limit = get_long(optarg);
       break;
-    }
     case 'o':
       do_inotify = false;
+      break;
+    case 'r':
+      rrr_sample_rate = get_long(optarg);
       break;
     case '?':
       print_help(stderr);
@@ -1980,11 +2014,21 @@ int main(int argc, char *argv[])
     err_exit(EX_USAGE, "one argument");
   const char *pcap_dir = argv[optind];
 
+#define D(name) printf("%s: %ld\n", #name, name)
+
   if (is_index_mode) {
     log_status("index mode\n");
+    D(fmindex_sample_rate);
+    D(rrr_sample_rate);
     index_mode(pcap_dir, do_inotify);
   } else {
     log_status("server mode\n");
-    server_mode(pcap_dir, search_limit);
+    D(autocomplete_length);
+    D(autocomplete_limit);
+    D(context_length);
+    D(search_limit);
+    server_mode(pcap_dir);
   }
+
+#undef D
 }
