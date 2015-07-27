@@ -61,11 +61,20 @@
   }
   </script>
   <script type="riot/tag">
+    <Hex>
+      <p each={gen_hex(parent.hex)}><p>
+      gen_hex(data){
+        // format [is/not in keyword, value]
+        data.split('')
+      }
+    </Hex>
+  </script>
+  <script type="riot/tag">
     <search_bar>
       <div class="searchbox">
         <div class="ui one columns grid container searchbox">
           <div class="ui column">
-            <h1 class="header">pcap Search</h1>
+            <h1 class="header">pcap Search<small if="loading">数据载入中</small></h1>
             <div class="ui search">
               <div class="ui icon fluid input">
                 <input type="text" class="prompt" placeholder="Search..." onfocus={small} onkeypress={submit}>
@@ -78,7 +87,7 @@
         </div>
       </div>
       <div class="ui one column grid container resultBox">
-        <div each={n, page in pages} class="ui column">
+        <div each={n, page in pages} class="ui column" id={'page'+n}>
           <h2 class="ui centered inverted header">
             <div class="">Page {n}</div>
           </h2>
@@ -104,6 +113,7 @@
         </div>
       </div>
       <div class="ui modal">
+        <i class="close icon"></i>
         <div class="header">View</div>
         <div class='content'>
           <div class="ui top attached tabular menu">
@@ -111,16 +121,20 @@
             <a class="item" data-tab="second">Repr</a>
           </div>
           <div class="ui bottom attached active tab segment" data-tab="first">
-
+            <Hex></Hex>
           </div>
           <div class="ui bottom attached tab segment" data-tab="second">
-            <code></code>
+            <code>{code}</code>
           </div>
+        </div>
+        <div class="actions">
+          <div class="ui close button">OK</div>
         </div>
       </div>
       this.on('mount', function(){
         // init the search
         this.pages = {}
+        this.loading = false
         $('.ui.search').search({
           cache: false,
           maxResults: 100, // huge number
@@ -140,12 +154,35 @@
             this.search(e.title)
           }.bind(this)
         })
+        // init the tab and the modal
+        this.hex = ''
+        this.repr = ''
+        this.loading = true;
+        $('.modal.ui').modal()
+        $('.ui.tab').tab()
       })
       download(file, offset, type){
         return "/download?filename="+ encodeURIComponent(file) + "&type=" + encodeURIComponent(type) + (offset == undefined?"":"&offset=" + encodeURIComponent(offset));
       }
       small(){
         $('body').removeClass('none')
+      }
+      open(file, offset){
+        // clean the original data
+        this.hex = undefined;
+        this.repr = undefined;
+        // fetch the data
+        this.loading = true
+        this.update() // animate
+        $.get(this.download(file, offset, "hex"), {},function(response){
+          console.log(response)
+          this.loading = false // now we can show a modal
+          this.hex = response
+          $('.ui.modal').modal('show');
+          $.get(this.download(file, offset, 'repr'), {}, function(response){
+            this.repr = response
+          }, 'text')
+        }.bind(this), 'text') // hex is default
       }
       show_complete(e){
         var input_text = e.target.value;
@@ -169,7 +206,7 @@
         return true
       }
       search(keyword, page){
-        console.log(this.keyword, keyword)
+        // console.log(this.keyword, keyword)
         if(this.keyword != keyword){
           this.pages = {}
           this.page = 0
