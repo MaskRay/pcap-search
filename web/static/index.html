@@ -49,7 +49,7 @@
     font-width: bold;
     color: red;
   }
-  code.hex, code.repr, code.str{
+  code.hex, code.repr, code.str, code.python{
     overflow-x: scroll;
     white-space: pre-wrap;
     break-word: break-all;
@@ -156,6 +156,7 @@
             <a class="active item" data-tab="first">Hex</a>
             <a class="item" data-tab="second">repr</a>
             <a class="item" data-tab="third">String</a>
+            <a class="item" data-tab="fourth">Python</a>
           </div>
           <div class="ui bottom attached active tab segment" data-tab="first">
             <code class="hex">
@@ -170,6 +171,11 @@
           <div class="ui bottom attached tab segment" data-tab="third">
             <code class="str">
               <div each={i,j in str}>{i}</div>
+            </code>
+          </div>
+          <div class="ui bottom attached tab segment" data-tab="fourth">
+            <code class="python">
+              <div each={i,j in python}>{i}</div>
             </code>
           </div>
         </div>
@@ -203,6 +209,7 @@
         // init the tab and the modal
         this.hex = ''
         this.repr = ''
+        this.python = ''
         $('.modal.ui').modal()
         $('.ui.menu.tabular .item').tab()
         $(window).scroll(function(e){
@@ -228,6 +235,7 @@
         this.hex = '';
         this.repr = '';
         this.str = "";
+        this.python = '';
         // fetch the data
         this.loading = true
         this.update() // animate
@@ -243,6 +251,10 @@
         }.bind(this), 'text')
         $.get(this.download(file, offset, 'str'), {}, function(response){
           this.str = response.split("--------------------------------------------\n")
+          this.update()
+        }.bind(this), 'text')
+        $.get(this.download(file, offset, 'python'), {}, function(response){
+          this.python = response.split("--------------------------------------------\n")
           this.update()
         }.bind(this), 'text')
       }

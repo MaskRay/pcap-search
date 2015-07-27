@@ -1714,79 +1714,8 @@ quit:
   }
 }
 
-//#define DEBUG
 int main(int argc, char *argv[])
 {
-#ifdef DEBUG
-
-  /*
-  BitSet bs(20);
-  bs.set_bits(0, 20, 0xd3d3);
-  RRR rrr(20, 2, 2, bs);
-
-  puts("-- at");
-  FOR(i, 0, 20)
-    printf("%d ",  rrr[i]);
-  puts("");
-
-  puts("-- rank0");
-  FOR(i, 0, 21) printf("%d ", rrr.rank0(i));
-  puts("");
-
-  puts("-- select0");
-  FOR(i, 0, rrr.zero_bits()) printf("%d ", rrr.select0(i));
-  puts("");
-
-  puts("-- select1");
-  FOR(i, 0, rrr.one_bits()) printf("%d ", rrr.select1(i));
-  puts("");
-
-  return 0;
-  */
-
-# if 1
-  int m = 100000;
-  char *c_text = new char[m];
-  REP(i,m)c_text[i] = i;
-  u8 *text = (u8*)c_text;
-
-  FMIndex x;
-  x.init(m, text, 16);
-  delete[] c_text;
-  //REP(i,n)
-  //  printf("%d: %d\n", i, x.at(i));
-
-  char *buf;
-  size_t size;
-  FILE *fh = open_memstream(&buf, &size);
-  Serializer se(fh);
-  se & x;
-  fflush(fh);
-  fclose(fh);
-
-  FMIndex y;
-  Deserializer de(buf);
-
-  de & y;
-
-  u8 line[99];
-  u32 t;
-  while (gets((char*)line)) {
-    u32 n = strlen((char*)line);
-    printf("= %zd\n", y.count(n, line));
-    auto xs = y.locate(n, line, 100, t);
-    printf("= %zd\n", xs.size());
-    for (auto x:xs)printf("%d ",x);
-    puts("");
-  }
-
-  printf("buf: %p\nsize: %zd\n", buf, size);
-
-  free(buf);
-  return 0;
-# endif
-#endif
-
   bool is_index_mode = false;
   bool do_inotify = true;
 
