@@ -15,6 +15,9 @@
     padding-top: 1em;
     max-height: 100vh;
   }
+  .ui.search > .results{
+    width: 100% !important;
+  }
   .input{
     transition: font-size 0.5s;
   }
@@ -122,7 +125,7 @@
             <h1 class="header">pcap Search<small if={loading}> Loading</small></h1>
             <div class="ui search">
               <div class="ui icon fluid input">
-                <input type="text" class="prompt" placeholder="Search..." onfocus={small} onkeypress={submit}>
+                <input type="text" class="prompt" placeholder="\\n \\r \\0 \\377 \\x12 for escaped char" onfocus={small} onkeypress={submit}>
                 <i class=" search icon" onclick={submit_click}></i>
               </div>
               <div class="results">
