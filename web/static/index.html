@@ -264,6 +264,7 @@
           this.hex = response.split("--------------------------------------------\n")
           this.update()
           $('.ui.modal').modal('show');
+          $('.ui.modal').modal('refresh');
         }.bind(this), 'text') // hex is default
         $.get(this.download(file, offset, 'repr'), {}, function(response){
           this.repr = response.split("--------------------------------------------\n")
