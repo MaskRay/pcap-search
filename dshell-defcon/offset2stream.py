@@ -1,5 +1,6 @@
 #!/usr/bin/env python2
 
+import re
 import sys
 import struct
 import socket
@@ -42,7 +43,8 @@ def out_hex(srcip, srcport, destip, dstport, data):
     print >>_out_file, ' --> ',
     print >>_out_file, socket.inet_ntoa(struct.pack('I', destip)) + ':' + str(dstport),
     print >>_out_file, '(%d bytes)' % len(data)
-    print >>_out_file, data.encode('hex')
+    enc_data = data.encode('hex')
+    print >>_out_file, ' '.join([enc_data[j:j+2] for j in xrange(0, len(enc_data), 2)])
 
 
 def out_str(srcip, srcport, destip, dstport, data):
