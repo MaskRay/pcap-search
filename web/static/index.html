@@ -65,6 +65,22 @@
     white-space: pre-wrap;
     word-break: break-all;
   }
+  .left.pages{
+    position: fixed;
+    top: 0;
+    overflow: scroll;
+    z-index:1;
+    max-height: 100vh;
+  }
+  .ui.vertical.menu{
+    width: auto !important;
+  }
+  .page{
+    color: black;
+  }
+  .vertical .item{
+    width: 1em;
+  }
   </style>
   <link rel="stylesheet" href="/semantic.min.css">
   <script src="/jquery.min.js"></script>
@@ -90,7 +106,7 @@
       <div class="searchbox">
         <div class="ui one columns grid container searchbox">
           <div class="ui column">
-            <h1 class="header">pcap Search<small if={loading}>数据载入中</small></h1>
+            <h1 class="header">pcap Search<small if={loading}> Loading</small></h1>
             <div class="ui search">
               <div class="ui icon fluid input">
                 <input type="text" class="prompt" placeholder="Search..." onfocus={small} onkeypress={submit}>
@@ -102,14 +118,19 @@
           </div>
         </div>
       </div>
+      <div class="left pages">
+        <div class="ui vertical pagination menu">
+          <a class={item: true, active:i == page} each={i,j in pages} href={'#page'+i}>{i}</a>
+        </div>
+      </div>
       <div class="ui one column grid container resultBox" onscroll={fetch}>
         <div each={n, page in pages} class="ui column" id={'page'+n}>
           <h2 class="ui centered inverted header">
-            <div class="">Page {n}</div>
+            <div class="page">Page {n}</div>
           </h2>
           <div each={file, packs in page} class="ui segments">
             <div class="ui segment">
-              {file} <a class="ui button" href={download(file, null, 'all')} target="_blank"><i class="ui download icon"></i>下载</a>
+              {file} <a class="ui button" href={download(file, null, 'all')} target="_blank"><i class="ui download icon"></i>Download Whole File</a>
             </div>
             <div class="ui secondary segment">
               <div class="ui divided list">
@@ -184,6 +205,14 @@
         this.repr = ''
         $('.modal.ui').modal()
         $('.ui.menu.tabular .item').tab()
+        $(window).scroll(function(e){
+          // console.log($(document).height() - $(window).scrollTop() - $(window).height(), !$('.modal.ui').modal('is active'), $('body').hasClass("none"))
+          if( $(document).height() - $(window).scrollTop() - $(window).height() < 100  && !$('.modal.ui').modal('is active') && !$('body').hasClass("none") && this.page != undefined){
+            this.next_page()
+            console.log('next page')
+            this.update()
+          }
+        }.bind(this))
       })
       download(file, offset, type){
         return "/download?filename="+ encodeURIComponent(file) + "&type=" + encodeURIComponent(type) + (offset == undefined?"":"&offset=" + encodeURIComponent(offset));
@@ -256,12 +285,12 @@
       }
       next_page(){
         if(!this.pages[this.page + 1]){
-          this.search(keyword, this.page + 1)
+          this.search(this.keyword, this.page + 1)
         }
       }
       prev_page(){
         if(!this.pages[this.page - 1] && this.page > 0){
-          this.search(keyword, this.page - 1)
+          this.search(this.keyword, this.page - 1)
         }
       }
       find(text){
@@ -279,7 +308,7 @@
 <body class="none">
   <search_bar></search_bar>
   <script>
-  riot.mount("*");
+  tags = riot.mount("*");
   </script>
 </body>
 </html>
