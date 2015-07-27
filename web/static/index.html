@@ -15,6 +15,9 @@
     padding-top: 1em;
     max-height: 100vh;
   }
+  .ui.search > .results{
+    width: 100% !important;
+  }
   .input{
     transition: font-size 0.5s;
   }
@@ -55,15 +58,18 @@
     break-word: break-all;
     display: block !important;
   }
-  code div:nth-child(2n){
-    background-color: #dfd;
+  code div{
     white-space: pre-wrap;
     word-break: break-all;
   }
-  code div:nth-child(2n+1){
+  code.hex div:nth-child(2n),code.repr div:nth-child(2n),code.str div:nth-child(2n){
+    background-color: #dfd;
+  }
+  code.hex div:nth-child(2n+1), code.repr div:nth-child(2n+1), code.str div:nth-child(2n+1){
     background-color: #FFA3A3;
-    white-space: pre-wrap;
-    word-break: break-all;
+  }
+  code.python div{
+    background-color: #ddd;
   }
   .left.pages{
     position: fixed;
@@ -80,6 +86,16 @@
   }
   .vertical .item{
     width: 1em;
+  }
+  .modal .content .tab{
+    height: 60vh;
+    overflow: auto;
+  }
+  .hidden{
+    height: 1px;
+    width: 1px;
+    position: fixed;
+    bottom: -1px
   }
   </style>
   <link rel="stylesheet" href="/semantic.min.css">
@@ -104,17 +120,53 @@
   <script type="riot/tag">
     <search_bar>
       <div class="searchbox">
-        <div class="ui one columns grid container searchbox">
+        <div class="ui one columns grid container">
           <div class="ui column">
             <h1 class="header">pcap Search<small if={loading}> Loading</small></h1>
             <div class="ui search">
               <div class="ui icon fluid input">
-                <input type="text" class="prompt" placeholder="Search..." onfocus={small} onkeypress={submit}>
+                <input type="text" class="prompt" placeholder="\\n \\r \\0 \\377 \\x12 for escaped char" onfocus={small} onkeypress={submit}>
                 <i class=" search icon" onclick={submit_click}></i>
               </div>
               <div class="results">
               </div>
             </div>
+          </div>
+        </div>
+        <div class="ui large modal">
+          <i class="close icon"></i>
+          <div class="header">View</div>
+          <div class='content'>
+            <div class="ui top attached tabular menu">
+              <a class="active item" data-tab="hex">Hex</a>
+              <a class="item" data-tab="repr">repr</a>
+              <a class="item" data-tab="str">String</a>
+              <a class="item" data-tab="python">Python</a>
+            </div>
+            <div class="ui bottom attached active tab segment" data-tab="hex">
+              <code class="hex">
+                <div each={i,j in hex}>{i}</div>
+              </code>
+            </div>
+            <div class="ui bottom attached tab segment" data-tab="repr">
+              <code class="repr">
+                <div each={i,j in repr}>{i}</div>
+              </code>
+            </div>
+            <div class="ui bottom attached tab segment" data-tab="str">
+              <code class="str">
+                <div each={i,j in str}>{i}</div>
+              </code>
+            </div>
+            <div class="ui bottom attached tab segment" data-tab="python">
+              <code class="python">
+                  <div>{python}</div>
+              </code>
+            </div>
+          </div>
+          <div class="actions">
+            <div class="ui copy button" onclick={copy}>Copy</div>
+            <div class="ui close button">OK</div>
           </div>
         </div>
       </div>
@@ -148,41 +200,7 @@
           </div>
         </div>
       </div>
-      <div class="ui big modal">
-        <i class="close icon"></i>
-        <div class="header">View</div>
-        <div class='content'>
-          <div class="ui top attached tabular menu">
-            <a class="active item" data-tab="first">Hex</a>
-            <a class="item" data-tab="second">repr</a>
-            <a class="item" data-tab="third">String</a>
-            <a class="item" data-tab="fourth">Python</a>
-          </div>
-          <div class="ui bottom attached active tab segment" data-tab="first">
-            <code class="hex">
-              <div each={i,j in hex}>{i}</div>
-            </code>
-          </div>
-          <div class="ui bottom attached tab segment" data-tab="second">
-            <code class="repr">
-              <div each={i,j in repr}>{i}</div>
-            </code>
-          </div>
-          <div class="ui bottom attached tab segment" data-tab="third">
-            <code class="str">
-              <div each={i,j in str}>{i}</div>
-            </code>
-          </div>
-          <div class="ui bottom attached tab segment" data-tab="fourth">
-            <code class="python">
-              <div each={i,j in python}>{i}</div>
-            </code>
-          </div>
-        </div>
-        <div class="actions">
-          <div class="ui close button">OK</div>
-        </div>
-      </div>
+      <textarea class="hidden"></textarea>
       this.on('mount', function(){
         // init the search
         this.pages = {}
@@ -207,9 +225,6 @@
           }.bind(this)
         })
         // init the tab and the modal
-        this.hex = ''
-        this.repr = ''
-        this.python = ''
         $('.modal.ui').modal()
         $('.ui.menu.tabular .item').tab()
         $(window).scroll(function(e){
@@ -227,6 +242,14 @@
       small(){
         $('body').removeClass('none')
       }
+      copy(){
+        var content = this[$('.modal .active.tab').attr('data-tab')];
+        if (content.join) {content = content.join('\n')}
+        var el = $('textarea')
+        el.val(content)
+        el.select()
+        document.execCommand('Copy')
+      }
       fetch(e){
         console.log(e)
       }
@@ -234,7 +257,7 @@
         // clean the original data
         this.hex = '';
         this.repr = '';
-        this.str = "";
+        this.str = '';
         this.python = '';
         // fetch the data
         this.loading = true
@@ -244,10 +267,15 @@
           this.hex = response.split("--------------------------------------------\n")
           this.update()
           $('.ui.modal').modal('show');
+          $('.ui.modal').modal('refresh');
         }.bind(this), 'text') // hex is default
         $.get(this.download(file, offset, 'repr'), {}, function(response){
           this.repr = response.split("--------------------------------------------\n")
           this.update()
+        }.bind(this), 'text')
+        $.get(this.download(file, offset, 'python'), {}, function(response){
+            this.python = response
+            this.update()
         }.bind(this), 'text')
         $.get(this.download(file, offset, 'str'), {}, function(response){
           this.str = response.split("--------------------------------------------\n")
