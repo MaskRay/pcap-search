@@ -14,7 +14,7 @@ rcontext = 30
 def enc(s):
     ss = ''
     for i in s:
-        if 32 <= ord(i) <= 126:
+        if 32 <= ord(i) <= 126 and i != "\\":
             ss += i
         else:
             ss += "\\x" + i.encode('hex')
@@ -71,7 +71,6 @@ def context(fname, offset, len_body):
 
     ff.close()
     return -1, -1, -1, ''
-
 
 while True:
     try:

@@ -132,26 +132,27 @@ get '/api/search' do
   res = ''
   total = 0
 
+  qq = q.gsub(/\\[0-7]{1,3}/) {|match|
+    "\\x#{'%02x' % match[1..-1].to_i(8)}"
+  }
+  .gsub('\\\\', '\\x5c')
+  .gsub('\\a', '\\x07')
+  .gsub('\\b', '\\x08')
+  .gsub('\\t', '\\x09')
+  .gsub('\\n', '\\x0a')
+  .gsub('\\v', '\\x0b')
+  .gsub('\\f', '\\x0c')
+  .gsub('\\r', '\\x0d')
+
   begin
     Timeout.timeout SEARCH_TIMEOUT do
       sock = Socket.new Socket::AF_UNIX, Socket::SOCK_STREAM, 0
       sock.connect Socket.pack_sockaddr_un(SEARCH_SOCK)
-      sock.write "#{offset}\0\0\0#{q}"
+      sock.write "#{offset}\0\0\0#{qq}"
       sock.close_write
       lines = sock.read.lines
       sock.close
       total = [lines[-1].to_i, PER_PAGE*MAX_PAGES].min
-      qq = q.gsub(/\\[0-7]{1,3}/) {|match|
-        "\\x#{'%02x' % match[1..-1].to_i(8)}"
-      }
-      .gsub('\\\\', '\\x5c')
-      .gsub('\\a', '\\x07')
-      .gsub('\\b', '\\x08')
-      .gsub('\\t', '\\x09')
-      .gsub('\\n', '\\x0a')
-      .gsub('\\v', '\\x0b')
-      .gsub('\\f', '\\x0c')
-      .gsub('\\r', '\\x0d')
 
       res = []
       IO.popen [File.join(DSHELL_DEFCON, 'context.py')], 'r+' do |h|
