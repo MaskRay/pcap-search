@@ -144,6 +144,7 @@ get '/api/search' do
       qq = q.gsub(/\\[0-7]{1,3}/) {|match|
         "\\x#{'%02x' % match[1..-1].to_i(8)}"
       }
+      .gsub('\\\\', '\\x5c')
       .gsub('\\a', '\\x07')
       .gsub('\\b', '\\x08')
       .gsub('\\t', '\\x09')
@@ -151,7 +152,6 @@ get '/api/search' do
       .gsub('\\v', '\\x0b')
       .gsub('\\f', '\\x0c')
       .gsub('\\r', '\\x0d')
-      .gsub('\\', '\\x5c')
 
       res = []
       IO.popen [File.join(DSHELL_DEFCON, 'context.py')], 'r+' do |h|
@@ -159,7 +159,8 @@ get '/api/search' do
           filename, offset, len = line.chomp.split "\t"
           h.puts "#{File.join(PCAP_DIR, filename)}\t#{offset}\t#{len}"
           h.flush
-          _, offset, epoch, port0, port1, context = h.readline.chomp.split "\t"
+          line = h.readline
+          _, offset, epoch, port0, port1, context = line.chomp.split "\t"
           epoch = epoch.to_i
           if epoch >= 0 && context && ! context.empty?
             res << {filename: filename.sub(/\.ap$/, ''), offset: offset.to_i, epoch: epoch, port0: port0.to_i, port1: port1.to_i, context: context}

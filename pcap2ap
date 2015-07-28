@@ -4,6 +4,8 @@ setopt nullglob
 
 program=$0
 dshell_defcon=${0:a:h}/dshell-defcon
+pcap_suffix=.cap
+ap_suffix=.ap
 
 usage() {
   cat <<e
@@ -25,6 +27,10 @@ log_action() { tput setaf 2; log_generic "$@"; tput sgr0 }
 log_status() { tput setaf 3; log_generic "$@"; tput sgr0 }
 log_event() { tput setaf 6; log_generic "$@"; tput sgr0 }
 
+declare -A modified
+add() { modified[$1]=1 }
+del() { unset "modified[$1]" }
+
 semaphore() {
   seq $parallel
   while read; do
@@ -32,19 +38,21 @@ semaphore() {
   done
 }
 
-process() {
+add_data() {
   filename=$1
-  if [[ $filename =~ '\.cap$' ]]; then
-    log_status found $filename
-    (
-      read -p
-      start=$(date +%s.%N)
-      $dshell_defcon/dshell-decode -d stream2dump --stream2dump_outfiles=$filename.ap $filename >/dev/null
-      stop=$(date +%s.%N)
-      log_action created .ap for $filename, size: $(stat -c %s $filename), used $(bc -l<<<"scale=3;($stop-$start)/1") s
-      print -p
-    ) &
-  fi
+  log_status found $filename
+  (
+    read -p
+    start=$(date +%s.%N)
+    $dshell_defcon/dshell-decode -d stream2dump --stream2dump_outfiles=$filename$ap_suffix $filename >/dev/null
+    stop=$(date +%s.%N)
+    log_action created $ap_suffix for $filename, size: $(stat -c %s $filename), used $(bc -l<<<"scale=3;($stop-$start)/1") s
+    print -p
+  ) &
+}
+
+rm_data() {
+  rm -fv $filename$ap_suffix
 }
 
 parallel=$(nproc)
@@ -66,12 +74,44 @@ coproc semaphore
 
 log_status processing $dir
 
-for i in *.cap; do
-  [[ -e $i.ap && ! -z $i.ap ]] || process $i
+for i in *$pcap_suffix; do
+  [[ -e $i$ap_suffix && ! -z $i$ap_suffix ]] || add_data $i
 done
 
 log_status start inotify
 
-inotifywait -mrqe CLOSE_WRITE --format %f . | while read filename; do
-  process $filename
+inotifywait -mqe CREATE,CLOSE_WRITE,DELETE,MODIFY,MOVE --format $'%e\t%f' /tmp/n | while IFS=$'\t' read -r event filename; do
+  [[ $filename =~ "\\$pcap_suffix\$" ]] || continue
+  if [[ $event =~ CREATE ]]; then
+    log_event CREATE $filename
+    if filetype=$(stat -c %F $filename); then
+      if [[ $filetype =~ symbolic ]]; then
+        add_data $filename
+      else
+        add $filename
+      fi
+    fi
+  elif [[ $event =~ DELETE ]]; then
+    log_event DELETE $filename
+    del $filename
+    rm_data $filename
+  elif [[ $event =~ MOVED_FROM ]]; then
+    log_event MOVED_FROM $filename
+    del $filename
+    rm_data $filename
+  elif [[ $event =~ MOVED_TO ]]; then
+    log_event MOVED_TO $filename
+    add_data $filename
+  elif [[ $event =~ MODIFY ]]; then
+    log_event MODIFY $filename
+    add $filename
+  elif [[ $event =~ CLOSE_WRITE ]]; then
+    if [[ -n ${modified[$filename]} ]]; then
+      log_event CLOSE_WRITE after MODIFY $filename
+      del $filename
+      add_data $filename
+    else
+      log_event CLOSE_WRITE $filename
+    fi
+  fi
 done

@@ -2,6 +2,7 @@
 # define _GNU_SOURCE
 #endif
 #include <algorithm>
+#include <atomic>
 #include <arpa/inet.h>
 #include <cassert>
 #include <cctype>
@@ -28,6 +29,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/un.h>
 #include <sysexits.h>
@@ -69,13 +71,13 @@ string data_suffix = ".ap";
 string index_suffix = ".fm";
 long autocomplete_limit = 20;
 long autocomplete_length = 20;
-long lcontext_length = 40;
-long rcontext_length = 30;
 long search_limit = 20;
 long fmindex_sample_rate = 32;
 long rrr_sample_rate = 8;
 long request_timeout_milli = 1000;
+long request_count = -1;
 bool do_inotify = true;
+atomic<int> ongoing_requests(0);
 
 ///// log
 
@@ -1183,6 +1185,16 @@ public:
     return x.second-x.first;
   }
 
+  u32 calc_sa(u32 rank) const {
+    u32 d = 0, i = rank;
+    while (! sampled_ef_.exist(i)) {
+      int c = bwt_wm_[i + (i < initial_)];
+      i = cnt_lt_[c] + bwt_wm_.rank(c, i + (i < initial_));
+      d++;
+    }
+    return ssa_[sampled_ef_.rank(i)] + d;
+  }
+
   u32 locate(u32 m, const u8 *pattern, bool autocomplete, u32 limit, u32 &skip, vector<u32> &res) const {
     u32 l, h, total;
     if (m) {
@@ -1209,9 +1221,6 @@ public:
       res.push_back(pos);
     }
     return total;
-  }
-
-  void autocomplete(const u8 *text, u32 m, const u8 *pattern, u32 limit, vector<u32> &res) const {
   }
 
   template<typename Archive>
@@ -1312,11 +1321,11 @@ void print_help(FILE *fh)
         "  --autocomplete-limit C\n"
         "  --fmindex-sample-rate R   sample rate of suffix array (for rank -> pos) used in FM index\n"
         "  --rrr-sample-rate R       R blocks are grouped to a superblock\n"
-        "  -o, --oneshot             index mode. run only once (no inotify)\n"
+        "  -o, --oneshot             run only once (no inotify)\n"
         "\n"
         "  server mode:\n"
-        "  --context-length L\n"
-        "  -l, --search-limit        server mode. max number of results\n"
+        "  -c, --request-count       max number of requests (default: -1)\n"
+        "  -l, --search-limit        max number of results\n"
         "\n"
         "  others:\n"
         "  -i, --index               index mode. (default: server mode)\n"
@@ -1369,9 +1378,9 @@ protected:
 
   virtual bool is_index_mode() const = 0;
 
-  virtual void add_data(string) = 0;
+  virtual void add_data(const string &) = 0;
 
-  virtual void rm_data(string) = 0;
+  virtual void rm_data(const string &) = 0;
 
   string to_path(const string &name) const {
     return string(data_dir)+"/"+name;
@@ -1417,8 +1426,14 @@ protected:
           if (! is_index_mode())
             name = name.substr(0, name.size()-index_suffix.size());
           if (ev->mask & IN_CREATE) {
+            struct stat statbuf;
             log_event("CREATE %s\n", name.c_str());
-            modified_.insert(name);
+            if (lstat(to_path(name).c_str(), &statbuf) < 0) continue;
+            if (S_IFLNK & statbuf.st_mode) {
+              modified_.erase(name);
+              add_data(name);
+            } else if (S_IFREG & statbuf.st_mode)
+              modified_.insert(name);
           } else if (ev->mask & IN_DELETE) {
             log_event("DELETE %s\n", name.c_str());
             modified_.erase(name);
@@ -1448,7 +1463,7 @@ class Indexer : public Processor
 protected:
   bool is_index_mode() const override { return true; }
 
-  void add_data(string name) override {
+  void add_data(const string &name) override {
     string index_name = name+index_suffix;
     int index_fd = -1, pcap_fd = -1;
     off_t pcap_size;
@@ -1472,7 +1487,7 @@ protected:
       else if (nread < 4 || memcmp(buf, MAGIC_GOOD, 4))
         log_status("index file %s: bad magic. rebuilding\n", index_name.c_str());
       else if (nread < 8 || *((int*)buf+1) != pcap_size)
-        log_status("index file %s: wrong length. rebuilding\n", index_name.c_str());
+        log_status("index file %s: mismatching length of data file. rebuilding\n", index_name.c_str());
       else
         goto quit;
     }
@@ -1516,7 +1531,7 @@ quit:
       err_msg("failed to index %s", name.c_str());
   }
 
-  void rm_data(string name) override {
+  void rm_data(const string &name) override {
     string index_path = to_path(name+index_suffix);
     if (! unlink(index_path.c_str()))
       log_action("unlinked %s\n", index_path.c_str());
@@ -1554,7 +1569,7 @@ protected:
 
   bool is_index_mode() const override { return false; }
 
-  void add_data(string name) override {
+  void add_data(const string &name) override {
     string index_name = name+index_suffix;
     auto entry = make_shared<Entry>();
     entry->mmap = MAP_FAILED;
@@ -1611,7 +1626,7 @@ quit:
       err_msg("failed to load index file %s", index_name.c_str());
   }
 
-  void rm_data(string name) override {
+  void rm_data(const string &name) override {
     if (name2entry_.count(name)) {
       name2entry_.erase(name);
       log_action("no serving %s\n", name.c_str());
@@ -1637,7 +1652,7 @@ public:
     process_dir();
     log_status("start inotify\n");
 
-    for(;;) {
+    for (; request_count; request_count > 0 && request_count--) {
       fd_set rfds;
       FD_ZERO(&rfds);
       FD_SET(inotify_fd, &rfds);
@@ -1663,7 +1678,13 @@ public:
         wd->name2entry = name2entry_; // make a copy of name2entry to prevent race condition
         pthread_create(&tid, &attr, worker, wd);
         pthread_attr_destroy(&attr);
+        ongoing_requests++;
       }
+    }
+    close(inotify_fd);
+    close(sockfd);
+    while (ongoing_requests.load() > 0) {
+      sleep(1);
     }
   }
 
@@ -1693,16 +1714,16 @@ public:
       nread += t;
     }
 
-    for (p = buf; p < buf+sizeof(buf) && *p; p++);
-    if (++p >= buf+sizeof(buf))
+    for (p = buf; p < buf+nread && *p; p++);
+    if (++p >= buf+nread)
       goto quit;
     file_begin = p;
-    for (; p < buf+sizeof(buf) && *p; p++);
-    if (++p >= buf+sizeof(buf))
+    for (; p < buf+nread && *p; p++);
+    if (++p >= buf+nread)
       goto quit;
     file_end = p;
-    for (; p < buf+sizeof(buf) && *p; p++);
-    if (++p >= buf+sizeof(buf))
+    for (; p < buf+nread && *p; p++);
+    if (++p >= buf+nread)
       goto quit;
 
     {
@@ -1730,7 +1751,8 @@ public:
                                 return get<2>(x) == get<2>(y);
                                 }), candidates.end());
         for (auto &cand: candidates)
-          dprintf(data->clifd, "%s\t%u\t%s\n", get<0>(cand).c_str(), get<1>(cand), escape(get<2>(cand)).c_str()); // may SIGPIPE
+          if (dprintf(data->clifd, "%s\t%u\t%s\n", get<0>(cand).c_str(), get<1>(cand), escape(get<2>(cand)).c_str()) < 0)
+            goto quit;
       } else {
         char *end;
         errno = 0;
@@ -1745,7 +1767,8 @@ public:
               string pattern = unescape(len, p);
               total += entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), false, search_limit, skip, res);
               FOR(i, old_size, res.size())
-                dprintf(data->clifd, "%s\t%u\t%u\n", name.c_str(), res[i], len);
+                if (dprintf(data->clifd, "%s\t%u\t%u\n", name.c_str(), res[i], len) < 0)
+                  goto quit;
               if (res.size() >= autocomplete_limit) break;
             }
           }
@@ -1756,6 +1779,7 @@ public:
 quit:
     close(data->clifd);
     delete data;
+    ongoing_requests--;
     return NULL;
   }
 };
@@ -1769,20 +1793,20 @@ int main(int argc, char *argv[])
   static struct option long_options[] = {
     {"autocomplete-length", required_argument, 0,   1},
     {"autocomplete-limit",  required_argument, 0,   2},
-    {"context-length",      no_argument,       0,   3},
     {"data-suffix",         required_argument, 0,   's'},
     {"fmindex-sample-rate", required_argument, 0,   'f'},
     {"help",                no_argument,       0,   'h'},
     {"index",               no_argument,       0,   'i'},
     {"index-suffix",        required_argument, 0,   'S'},
     {"oneshot",             no_argument,       0,   'o'},
+    {"request-count",       required_argument, 0,   'c'},
     {"request-timeout",     required_argument, 0,   4},
     {"rrr-sample-rate",     required_argument, 0,   5},
     {"search-limit",        required_argument, 0,   'l'},
     {0,                     0,                 0,   0},
   };
 
-  while ((opt = getopt_long(argc, argv, "f:hil:or:p:s:S:", long_options, NULL)) != -1) {
+  while ((opt = getopt_long(argc, argv, "c:f:hil:or:p:s:S:", long_options, NULL)) != -1) {
     switch (opt) {
     case 1:
       autocomplete_length = get_long(optarg);
@@ -1790,15 +1814,14 @@ int main(int argc, char *argv[])
     case 2:
       autocomplete_limit = get_long(optarg);
       break;
-    case 3:
-      lcontext_length = get_long(optarg);
-      rcontext_length = get_long(optarg);
-      break;
     case 4:
       request_timeout_milli = get_long(optarg);
       break;
     case 5:
       rrr_sample_rate = get_long(optarg);
+      break;
+    case 'c':
+      request_count = get_long(optarg);
       break;
     case 'f':
       fmindex_sample_rate = get_long(optarg);
@@ -1844,8 +1867,6 @@ int main(int argc, char *argv[])
     log_status("server mode\n");
     D(autocomplete_length);
     D(autocomplete_limit);
-    D(lcontext_length);
-    D(rcontext_length);
     D(search_limit);
     Server().run();
   }

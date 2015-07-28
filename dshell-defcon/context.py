@@ -54,6 +54,7 @@ def context(fname, offset, len_body):
                 data_end = ff.tell()
                 if outputed >= 0 and outputed < rcontext:
                     output_data += dir2arrow[direction] + enc(data[:rcontext - outputed])
+                    break
                 if data_begin <= offset < data_end:
                     output_data = data[offset - data_begin: offset - data_begin + len_body]
                     blobr = data[offset - data_begin + len_body: ]
