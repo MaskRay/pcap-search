@@ -11,6 +11,16 @@ lcontext = 50
 rcontext = 30
 
 
+def enc(s):
+    ss = ''
+    for i in s:
+        if 32 <= ord(i) <= 126:
+            ss += i
+        else:
+            ss += "\\x" + i.encode('hex')
+    return ss
+
+
 def context(fname, offset, len_body):
     ff = open(fname, 'rb')
 
@@ -47,7 +57,7 @@ def context(fname, offset, len_body):
                     outputed = len(blobr)
                 last_blob = data
             ff.close()
-            return timestamp, servport, cliport, repr(output_data)[1:-1]
+            return timestamp, servport, cliport, enc(output_data)
         current_offset += i
 
     ff.close()
