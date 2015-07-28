@@ -159,7 +159,8 @@ get '/api/search' do
           filename, offset, len = line.chomp.split "\t"
           h.puts "#{File.join(PCAP_DIR, filename)}\t#{offset}\t#{len}"
           h.flush
-          _, offset, epoch, port0, port1, context = h.readline.chomp.split "\t"
+          line = h.readline
+          _, offset, epoch, port0, port1, context = line.chomp.split "\t"
           epoch = epoch.to_i
           if epoch >= 0 && context && ! context.empty?
             res << {filename: filename.sub(/\.ap$/, ''), offset: offset.to_i, epoch: epoch, port0: port0.to_i, port1: port1.to_i, context: context}

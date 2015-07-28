@@ -28,6 +28,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/un.h>
 #include <sysexits.h>
@@ -1417,8 +1418,14 @@ protected:
           if (! is_index_mode())
             name = name.substr(0, name.size()-index_suffix.size());
           if (ev->mask & IN_CREATE) {
+            struct stat statbuf;
             log_event("CREATE %s\n", name.c_str());
-            modified_.insert(name);
+            if (lstat(to_path(name).c_str(), &statbuf) < 0) continue;
+            if (S_IFLNK & statbuf.st_mode) {
+              modified_.erase(name);
+              add_data(name);
+            } else if (S_IFREG & statbuf.st_mode)
+              modified_.insert(name);
           } else if (ev->mask & IN_DELETE) {
             log_event("DELETE %s\n", name.c_str());
             modified_.erase(name);
