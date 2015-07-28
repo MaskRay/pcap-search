@@ -339,7 +339,6 @@
         if(this.keyword.length == 0){
           return [[0,text]]
         }
-
         var regex = /(→|←)([^←→]+)/gi, result, indices = [];
         while ( (result = regex.exec(text)) ) {
           var dir;
@@ -350,6 +349,8 @@
               indices.push([1, this.keyword])
             }.bind(this))
             indices.pop()
+          }else{
+            indices.push([dir, result[0]])
           }
         }
         return indices
