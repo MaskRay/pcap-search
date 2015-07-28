@@ -47,17 +47,17 @@ def context(fname, offset, len_body):
                     outputed = len(blobr)
                 last_blob = data
             ff.close()
-            return repr(output_data)[1:-1]
+            return timestamp, servport, cliport, repr(output_data)[1:-1]
         current_offset += i
 
     ff.close()
-    return ''
+    return -1, -1, -1, ''
 
 
 while True:
     try:
         fname, offset, len_body = raw_input().split('\t')
-        ret = context(fname, int(offset), int(len_body))
-        print "%s\t%d\t%s" % (fname, int(offset), ret)
+        timestamp, servport, cliport, ret = context(fname, int(offset), int(len_body))
+        print "%s\t%d\t%d\t%d\t%d\t%s" % (fname, int(offset), timestamp, servport, cliport, ret)
     except EOFError:
         break
