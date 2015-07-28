@@ -109,7 +109,6 @@ get '/api/autocomplete' do
         filename, offset, context = line.chomp.split "\t"
         filename = filename.sub(/\.ap$/, '')
         offset = offset.to_i
-        puts "+ #{filename} #{offset} #{context}"
         offset2stream filename, offset, 'loc', '/dev/stdout' do |h|
           _, y = h.read.split.map(&:to_i)
           sug << context.scan(/(?:\\x(?:..)|[^\\]){,#{[y-offset,context.size].min}}/)[0] if offset < y
@@ -162,7 +161,7 @@ get '/api/search' do
           h.flush
           _, offset, epoch, port0, port1, context = h.readline.chomp.split "\t"
           epoch = epoch.to_i
-          if epoch >= 0 && ! context.empty?
+          if epoch >= 0 && context && ! context.empty?
             res << {filename: filename.sub(/\.ap$/, ''), offset: offset.to_i, epoch: epoch, port0: port0.to_i, port1: port1.to_i, context: context}
           end
         }
