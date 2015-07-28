@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh">
 <head>
   <meta charset="UTF-8">
   <title>Search</title>
@@ -40,13 +40,14 @@
     background-color: #FFEEEE;
     display: inline;
     word-break: break-all;
+    line-height: 18px !important;
   }
   .line-number{
     font-weight: bold;
     font-family: Monospace;
     display: inline-block;
-    min-width: 8em;
-    text-margin:  right;
+    min-width: 6em;
+    text-margin: right;
   }
   .keyword{
     font-width: bold;
@@ -61,6 +62,12 @@
   code div{
     white-space: pre-wrap;
     word-break: break-all;
+  }
+  code .left{
+    background-color: #FFE0E0;
+  }
+  code .right{
+    background-color: #D0FFBF;
   }
   code.hex div:nth-child(2n),code.repr div:nth-child(2n),code.str div:nth-child(2n){
     background-color: #dfd;
@@ -107,15 +114,6 @@
   $.fn.api.settings.api = {
     'search': "/api/autocomplete?q={query}"
   }
-  </script>
-  <script type="riot/tag">
-    <Hex>
-      <p each={gen_hex(parent.hex)}><p>
-      gen_hex(data){
-        // format [is/not in keyword, value]
-        data.split('')
-      }
-    </Hex>
   </script>
   <script type="riot/tag">
     <search_bar>
@@ -192,7 +190,10 @@
                     <div class="ui button" onclick={open.bind(this, file, offset)}>View</div>
                   </div>
                   <div class="middle aligned content">
-                    <span class="line-number">{offset}</span><code class="code"><span class={keyword: i[0]} each={i,j in find(context)}>{i[1]}</span></code>
+                    <span class="line-number">{offset}</span><span class="ui label">Sever:{port0}</span><span class="ui label">Client:{port1}</span> <span class="ui label">{new Date(epoch*1000).toLocaleString('ja-JP')}</span>
+                    <div>
+                      <code class="code"><span class={keyword: i[0] == 1, left: i[0] == 2, right: i[0] == 3} each={i,j in find(context)}>{i[1]}</span></code>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -216,7 +217,7 @@
                   return {title: x}
                 })
               }
-              console.log(ret)
+              // console.log(ret)
               return ret
             }
           },
@@ -317,7 +318,7 @@
         $.get('/api/search', {page: page, q:keyword},function(response){
           // console.log(response.results);
           this.pages[page] = response.results
-          this.keyword = keyword
+          this.keyword = response.query // use the server side query to avoid different escaped type
           this.page = page
           this.update()
           $('.ui.search').search('hide results')
@@ -334,13 +335,24 @@
         }
       }
       find(text){
-        var ret = [];
-        text.split(this.keyword).forEach(function(x){
-          ret.push([0,x])
-          ret.push([1,this.keyword])
-        }.bind(this))
-        // console.log(ret)
-        return ret.slice(0, -1)
+        var ret = [], i = 0, head= 0;
+        if(this.keyword.length == 0){
+          return [[0,text]]
+        }
+
+        var regex = /(→|←)([^←→]+)/gi, result, indices = [];
+        while ( (result = regex.exec(text)) ) {
+          var dir;
+          dir = result[1] == "←" ? 2 : 3;
+          if(result[2].indexOf(this.keyword) > -1){
+            result[2].split(this.keyword).forEach(function(word){
+              indices.push([dir, word])
+              indices.push([1, this.keyword])
+            }.bind(this))
+            indices.pop()
+          }
+        }
+        return indices
       }
     </search_bar>
   </script>
