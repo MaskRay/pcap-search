@@ -108,11 +108,15 @@
     height: 60vh;
     overflow: auto;
   }
-  .hidden{
+  textarea.hidden{
     height: 1px;
     width: 1px;
     position: fixed;
     bottom: -10px;
+    display: block;
+  }
+  .hidden{
+    display: none;
   }
   </style>
   <link rel="stylesheet" href="/semantic.min.css">
@@ -188,7 +192,7 @@
           <a class={item: true, active:i == page} each={i,j in pages} href={'#page'+i}>{i}</a>
         </div>
       </div>
-      <div class="ui one column grid container resultBox" onscroll={fetch}>
+      <div class="ui one column grid container resultBox">
         <div each={n, page in pages} class="ui column" id={'page'+n}>
           <h2 class="ui centered inverted header">
             <div class="page">Page {n}</div>
@@ -205,7 +209,7 @@
                     <div class="ui button" onclick={open.bind(root, this)}>View</div>
                   </div>
                   <div class="middle aligned content">
-                    <span class="line-number">{offset}</span><span class="ui label">Sever:{port0}</span><span class="ui label">Client:{port1}</span> <span class="ui label">{new Date(epoch*1000).toLocaleString('ja-JP')}</span>
+                    <span class="line-number">{offset}</span><span class="ui label">Sever:{port0}</span><span class="ui label">Client:{port1}</span> <span class="ui label">{epoch}</span>
                     <div>
                       <code class="code"><span class={keyword: i[0] == 1, left: i[0] == 2, right: i[0] == 3} each={i,j in find(context)}>{i[1]}</span></code>
                     </div>
@@ -214,6 +218,10 @@
               </div>
             </div>
           </div>
+
+        </div>
+        <div class={hidden: !loading}>
+          <h4>Loading ..</h4>
         </div>
       </div>
       <textarea class="hidden"></textarea>
@@ -243,14 +251,17 @@
         // init the tab and the modal
         $('.modal.ui').modal()
         $('.ui.menu.tabular .item').tab()
-        // $(window).scroll(function(e){
+        $(window).scroll(function(e){
           // console.log($(document).height() - $(window).scrollTop() - $(window).height(), !$('.modal.ui').modal('is active'), $('body').hasClass("none"))
-          // if( $(document).height() - $(window).scrollTop() - $(window).height() < 100 && !$('.modal.ui').modal('is active') && !$('body').hasClass("none") && this.page != undefined){
-            // this.next_page()
-            // console.log('next page')
-            // this.update()
-          // }
-        // }.bind(this))
+          var totalHeight = document.documentElement.scrollHeight;
+          var clientHeight = document.documentElement.clientHeight;
+          var scrollTop = (document.body && document.body.scrollTop)? document.body.scrollTop : document.documentElement.scrollTop;
+          if( totalHeight - scrollTop - clientHeight < clientHeight*0.5 && !$('.modal.ui').modal('is active') && !$('body').hasClass("none") && this.page != undefined && !this.loading){
+            this.next_page()
+            console.log('next page')
+            this.update()
+          }
+        }.bind(this))
       }.bind(this))
       download(file, offset, type){
         return "/download?filename="+ encodeURIComponent(file) + "&type=" + encodeURIComponent(type) + (offset == undefined?"":"&offset=" + encodeURIComponent(offset));
@@ -351,6 +362,12 @@
         $.get('/api/search', {page: page, q:keyword},function(response){
           // console.log(response.results);
           this.pages[page] = response.results
+          for(var key in this.pages[page]){
+            this.pages[page][key].map(function(x){
+              x.epoch = new Date(x.epoch * 1000).toLocaleString("ja-JP")
+              return x
+            })
+          }
           this.keyword = response.query // use the server side query to avoid different escaped type
           this.page = page
           this.update()
