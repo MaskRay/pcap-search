@@ -1745,10 +1745,7 @@ public:
               string pattern = unescape(len, p);
               total += entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), false, search_limit, skip, res);
               FOR(i, old_size, res.size())
-                dprintf(data->clifd, "%s\t%u\t%s\t%s\t%s\n", name.c_str(), res[i],
-                        escape(string((char*)entry->mmap+max(res[i]-lcontext_length, 0l), (char*)entry->mmap+res[i])).c_str(),
-                        escape(pattern).c_str(),
-                        escape(string((char*)entry->mmap+res[i]+len, (char*)entry->mmap+min(long(entry->size), res[i]+rcontext_length))).c_str());
+                dprintf(data->clifd, "%s\t%u\t%u\n", name.c_str(), res[i], len);
               if (res.size() >= autocomplete_limit) break;
             }
           }
