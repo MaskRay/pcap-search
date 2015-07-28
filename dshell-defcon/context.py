@@ -22,7 +22,8 @@ def enc(s):
 
 dir2arrow = {
         'c': u"\u2190".encode('utf-8'),
-        's': u"\u2192".encode('utf-8')
+        's': u"\u2192".encode('utf-8'),
+        '': ''
         }
 
 
@@ -42,6 +43,7 @@ def context(fname, offset, len_body):
             cnt_pkt = struct.unpack('I', ff.read(4))[0]
             pkts_id = struct.unpack('I' * cnt_pkt, ff.read(4 * cnt_pkt))
             last_blob = ''
+            last_dir = ''
             outputed = -1
             output_data = ""
             for i in xrange(len_pkt):
