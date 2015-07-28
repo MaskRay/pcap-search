@@ -50,7 +50,6 @@ before do
   response.headers['Access-Control-Allow-Origin'] = '*'
 end
 
-
 get '/' do
   send_file File.join(__dir__,'static','index.html')
 end
@@ -75,7 +74,7 @@ get '/download' do
       attachment "#{filename.sub(/\.cap$/, '')}@#{offset}.cap"
     end
     temp_file = Tempfile.new filename
-    dshell filename, offset, type, temp_file.path do |h|
+    offset2stream filename, offset, type, temp_file.path do |h|
       h.read
     end
     Thread.new do
@@ -90,8 +89,8 @@ get '/download' do
   end
 end
 
-def dshell filename, offset, type, out, &block
-  IO.popen([File.join(DSHELL_DEFCON, './offset2stream.py'), File.join(PCAP_DIR, "#{filename}.ap"), offset.to_s, type, File.join(PCAP_DIR, filename), out], &block)
+def offset2stream filename, offset, type, out, &block
+  IO.popen([File.join(DSHELL_DEFCON, 'offset2stream.py'), File.join(PCAP_DIR, "#{filename}.ap"), offset.to_s, type, File.join(PCAP_DIR, filename), out], &block)
 end
 
 get '/api/autocomplete' do
@@ -111,7 +110,7 @@ get '/api/autocomplete' do
         filename = filename.sub(/\.ap$/, '')
         offset = offset.to_i
         puts "+ #{filename} #{offset} #{context}"
-        dshell filename, offset, 'loc', '/dev/stdout' do |h|
+        offset2stream filename, offset, 'loc', '/dev/stdout' do |h|
           _, y = h.read.split.map(&:to_i)
           sug << context.scan(/(?:\\x(?:..)|[^\\]){,#{[y-offset,context.size].min}}/)[0] if offset < y
         end
@@ -155,22 +154,20 @@ get '/api/search' do
       .gsub('\\r', '\\x0d')
       .gsub('\\', '\\x5c')
 
-      re = '(?:\\\\x(?:..)|[^\\\\])'
-      re2 = '(?:(?:..)x\\\\|[^\\\\])'
+      res = []
+      IO.popen [File.join(DSHELL_DEFCON, 'context.py')], 'r+' do |h|
+        lines[0...-1].each {|line|
+          filename, offset, len = line.chomp.split "\t"
+          h.puts "#{File.join(PCAP_DIR, filename)}\t#{offset}\t#{len}"
+          h.flush
+          _, offset, epoch, port0, port1, context = h.readline.chomp.split "\t"
+          epoch = epoch.to_i
+          if epoch >= 0 && ! context.empty?
+            res << {filename: filename.sub(/\.ap$/, ''), offset: offset.to_i, epoch: epoch, port0: port0.to_i, port1: port1.to_i, context: context}
+          end
+        }
+      end
 
-      res = lines[0..-2].map {|line|
-        filename, offset, lcontext, body, rcontext = line.chomp.split "\t"
-        filename = filename.sub(/\.ap$/, '')
-        offset = offset.to_i
-        len = body.scan(Regexp.new(re)).size
-        dshell filename, offset, 'loc', '/dev/stdout' do |h|
-          x, y = h.read.split.map &:to_i
-          lcontext = lcontext.reverse.scan(Regexp.new "#{re2}{,#{[offset-x,lcontext.size].min}}")[0].reverse
-          rcontext = rcontext.scan(Regexp.new "#{re}{,#{[y-offset-len,rcontext.size].min}}")[0]
-        end
-
-        {filename: filename.sub(/\.ap$/, ''), offset: offset, context: lcontext+body+rcontext}
-      }
       res_grouped = Hash.new {|h,k| h[k] = [] }
       res.each {|x|
         filename = x.delete :filename
@@ -182,10 +179,12 @@ get '/api/search' do
         results: res_grouped
       }.to_json
     end
-  rescue Timeout::Error
+  rescue Timeout::Error => e
+    STDERR.puts e.message
   rescue => e
     STDERR.puts e.message
     STDERR.puts e.backtrace
+  else
+    res
   end
-  res
 end

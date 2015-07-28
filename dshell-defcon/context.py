@@ -59,5 +59,6 @@ while True:
         fname, offset, len_body = raw_input().split('\t')
         timestamp, servport, cliport, ret = context(fname, int(offset), int(len_body))
         print "%s\t%d\t%d\t%d\t%d\t%s" % (fname, int(offset), timestamp, servport, cliport, ret)
+        sys.stdout.flush()
     except EOFError:
         break
