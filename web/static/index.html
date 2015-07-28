@@ -33,8 +33,18 @@
     background-color: #1873A4;
     padding-bottom: 100vh;
   }
+  .none h5{
+    opacity: 0;
+    display: inline-block;
+  }
   .none .input{
     font-size: 2em !important;
+  }
+  h1{
+    display: inline-block;
+  }
+  .searchbox h5{
+    margin-left: 2em;
   }
   code.code{
     background-color: #FFEEEE;
@@ -120,7 +130,12 @@
       <div class="searchbox">
         <div class="ui one columns grid container">
           <div class="ui column">
-            <h1 class="header">pcap Search<small if={loading}> Loading</small></h1>
+            <h1 class="header">pcap Search
+            <small if={loading}> Loading</small></h1>
+            <h5 class="ui transparent icon input">
+              <input id="input_port" type="text" placeholder="Search Port" onchange={change_port}>
+              <i class="search icon"></i>
+            </h5>
             <div class="ui search">
               <div class="ui icon fluid input">
                 <input type="text" class="prompt" placeholder="\\n \\r \\0 \\377 \\x12 for escaped char" onfocus={small} onkeypress={submit}>
@@ -184,10 +199,10 @@
             </div>
             <div class="ui secondary segment">
               <div class="ui divided list">
-                <div class="item" each={packs}>
+                <div class="item" each={packs} if={test_port(this)}>
                   <div class="right floated content">
                     <a class="ui button" href={download(file, offset, 'pcap')} target="_blank">PCAP</a>
-                    <div class="ui button" onclick={open.bind(this, file, offset)}>View</div>
+                    <div class="ui button" onclick={open.bind(root, this)}>View</div>
                   </div>
                   <div class="middle aligned content">
                     <span class="line-number">{offset}</span><span class="ui label">Sever:{port0}</span><span class="ui label">Client:{port1}</span> <span class="ui label">{new Date(epoch*1000).toLocaleString('ja-JP')}</span>
@@ -228,15 +243,15 @@
         // init the tab and the modal
         $('.modal.ui').modal()
         $('.ui.menu.tabular .item').tab()
-        $(window).scroll(function(e){
+        // $(window).scroll(function(e){
           // console.log($(document).height() - $(window).scrollTop() - $(window).height(), !$('.modal.ui').modal('is active'), $('body').hasClass("none"))
-          if( $(document).height() - $(window).scrollTop() - $(window).height() < 100  && !$('.modal.ui').modal('is active') && !$('body').hasClass("none") && this.page != undefined){
-            this.next_page()
-            console.log('next page')
-            this.update()
-          }
-        }.bind(this))
-      })
+          // if( $(document).height() - $(window).scrollTop() - $(window).height() < 100 && !$('.modal.ui').modal('is active') && !$('body').hasClass("none") && this.page != undefined){
+            // this.next_page()
+            // console.log('next page')
+            // this.update()
+          // }
+        // }.bind(this))
+      }.bind(this))
       download(file, offset, type){
         return "/download?filename="+ encodeURIComponent(file) + "&type=" + encodeURIComponent(type) + (offset == undefined?"":"&offset=" + encodeURIComponent(offset));
       }
@@ -254,7 +269,25 @@
       fetch(e){
         console.log(e)
       }
-      open(file, offset){
+      change_port(e){
+        this.port = this.input_port.value
+        console.log(this.port)
+        if(this.port){
+
+        }
+
+      }
+      test_port(context){
+        // console.log(arguments)
+        if(this.port){
+          return this.port == context.port0 || this.port == context.port1;
+        }else{
+          return true;
+        }
+      }
+      open(context){
+        var file = context.parent.file,
+            offset = context.offset;
         // clean the original data
         this.hex = '';
         this.repr = '';
@@ -275,8 +308,8 @@
           this.update()
         }.bind(this), 'text')
         $.get(this.download(file, offset, 'python'), {}, function(response){
-            this.python = response
-            this.update()
+          this.python = response
+          this.update()
         }.bind(this), 'text')
         $.get(this.download(file, offset, 'str'), {}, function(response){
           this.str = response.split("--------------------------------------------\n")
