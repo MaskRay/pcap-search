@@ -64,6 +64,7 @@ const char MAGIC_GOOD[] = "GOOD";
 
 const size_t BUF_SIZE = 512;
 const char *listen_path = "/tmp/search.sock";
+const char *data_dir;
 string data_suffix = ".ap";
 string index_suffix = ".fm";
 long autocomplete_limit = 20;
@@ -74,6 +75,7 @@ long search_limit = 20;
 long fmindex_sample_rate = 32;
 long rrr_sample_rate = 8;
 long request_timeout_milli = 1000;
+bool do_inotify = true;
 
 ///// log
 
@@ -1332,15 +1334,19 @@ void print_help(FILE *fh)
   exit(fh == stdout ? 0 : EX_USAGE);
 }
 
-jmp_buf jmpbuf;
-
 struct Entry
 {
-  bool valid;
   int fd, index_fd;
   int size, index_size;
   void *mmap, *index_mmap;
   FMIndex *fm;
+  ~Entry() {
+    delete fm;
+    munmap(mmap, size);
+    munmap(index_mmap, index_size);
+    close(fd);
+    close(index_fd);
+  }
 };
 
 bool is_data(const string &name)
@@ -1353,305 +1359,107 @@ bool is_index(const string &name)
   return name.size() >= index_suffix.size() && name.substr(name.size()-index_suffix.size()) == index_suffix;
 }
 
-void process_dir(const string &data_dir, bool do_inotify, int &inotify_fd, function<void(string)> fn)
+class Processor
 {
-  if (do_inotify) {
-    if ((inotify_fd = inotify_init()) < 0)
-      err_exit(EX_USAGE, "inotify_init");
-    if (inotify_add_watch(inotify_fd, data_dir.c_str(), IN_CLOSE_WRITE | IN_CREATE | IN_DELETE | IN_MODIFY | IN_MOVE) < 0)
-      err_exit(EX_USAGE, "inotify_add_watch");
-  }
-  DIR *dir = opendir(data_dir.c_str());
-  if (! dir)
-    err_exit(EX_OSERR, "opendir");
-  struct dirent dirent, *res;
-  while (readdir_r(dir, &dirent, &res) == 0 && res) {
-    string name = dirent.d_name;
-    if (is_data(name))
-      fn(name);
-  }
-  closedir(dir);
-}
+public:
+  set<string> modified_;
+  virtual ~Processor() {}
+protected:
+  int inotify_fd;
 
-void process_inotify(const string &data_dir, int inotify_fd, bool is_index_mode, set<string> &modified, function<void(string)> add_fn, function<void(string)> rm_fn)
-{
-  char buf[sizeof(inotify_event)+NAME_MAX+1];
-  int nread;
-  if ((nread = read(inotify_fd, buf, sizeof buf)) <= 0)
-    err_exit(EX_OSERR, "failed to read inotify fd");
-  for (auto *ev = (inotify_event *)buf; (char *)ev < (char *)buf+nread;
-       ev = (inotify_event *)((char *)ev + sizeof(inotify_event) + ev->len))
-    if (ev->len > 0)
-      if (is_index_mode ? is_data(ev->name) : is_index(ev->name)) {
-        string name = ev->name;
-        if (! is_index_mode)
-          name = name.substr(0, name.size()-index_suffix.size());
-        if (ev->mask & IN_CREATE) {
-          log_event("CREATE %s\n", name.c_str());
-          modified.insert(name);
-        } else if (ev->mask & IN_DELETE) {
-          log_event("DELETE %s\n", name.c_str());
-          modified.erase(name);
-          rm_fn(name);
-        } else if (ev->mask & IN_MOVED_FROM) {
-          log_event("MOVED_FROM %s\n", name.c_str());
-          modified.erase(name);
-          rm_fn(name);
-        } else if (ev->mask & IN_MOVED_TO) {
-          log_event("MOVED_TO %s\n", name.c_str());
-          add_fn(name);
-        } else if (ev->mask & IN_MODIFY)
-          modified.insert(name);
-        else if (ev->mask & IN_CLOSE_WRITE) {
-          if (modified.count(name)) {
-            modified.erase(name);
-            log_event("CLOSE_WRITE after MODIFY %s\n", name.c_str());
-            add_fn(name);
+  virtual bool is_index_mode() const = 0;
+
+  virtual void add_data(string) = 0;
+
+  virtual void rm_data(string) = 0;
+
+  string to_path(const string &name) const {
+    return string(data_dir)+"/"+name;
+  }
+
+  int open_data(const string &name) const {
+    return open(to_path(name).c_str(), O_RDONLY);
+  }
+
+  int open_index(const string &index_name, int flags, mode_t mode = 0) const {
+    return open(to_path(index_name).c_str(), flags, mode);
+  }
+
+  void process_dir() {
+    if (do_inotify) {
+      if ((inotify_fd = inotify_init()) < 0)
+        err_exit(EX_USAGE, "inotify_init");
+      if (inotify_add_watch(inotify_fd, data_dir, IN_CLOSE_WRITE | IN_CREATE | IN_DELETE | IN_MODIFY | IN_MOVE) < 0)
+        err_exit(EX_USAGE, "inotify_add_watch");
+    }
+    DIR *dir = opendir(data_dir);
+    if (! dir)
+      err_exit(EX_OSERR, "opendir");
+    struct dirent dirent, *res;
+    while (readdir_r(dir, &dirent, &res) == 0 && res) {
+      string name = dirent.d_name;
+      if (is_data(name))
+        add_data(name);
+    }
+    closedir(dir);
+  }
+
+  void process_inotify() {
+    char buf[sizeof(inotify_event)+NAME_MAX+1];
+    int nread;
+    if ((nread = read(inotify_fd, buf, sizeof buf)) <= 0)
+      err_exit(EX_OSERR, "failed to read inotify fd");
+    for (auto *ev = (inotify_event *)buf; (char *)ev < (char *)buf+nread;
+         ev = (inotify_event *)((char *)ev + sizeof(inotify_event) + ev->len))
+      if (ev->len > 0)
+        if (is_index_mode() ? is_data(ev->name) : is_index(ev->name)) {
+          string name = ev->name;
+          if (! is_index_mode())
+            name = name.substr(0, name.size()-index_suffix.size());
+          if (ev->mask & IN_CREATE) {
+            log_event("CREATE %s\n", name.c_str());
+            modified_.insert(name);
+          } else if (ev->mask & IN_DELETE) {
+            log_event("DELETE %s\n", name.c_str());
+            modified_.erase(name);
+            rm_data(name);
+          } else if (ev->mask & IN_MOVED_FROM) {
+            log_event("MOVED_FROM %s\n", name.c_str());
+            modified_.erase(name);
+            rm_data(name);
+          } else if (ev->mask & IN_MOVED_TO) {
+            log_event("MOVED_TO %s\n", name.c_str());
+            add_data(name);
+          } else if (ev->mask & IN_MODIFY)
+            modified_.insert(name);
+          else if (ev->mask & IN_CLOSE_WRITE) {
+            if (modified_.count(name)) {
+              modified_.erase(name);
+              log_event("CLOSE_WRITE after MODIFY %s\n", name.c_str());
+              add_data(name);
+            }
           }
         }
-      }
-}
-
-struct Worker
-{
-  int clifd;
-  map<string, shared_ptr<Entry>> name2entry;
+  }
 };
 
-void *serve_client(Worker *data)
+class Indexer : public Processor
 {
-  char buf[BUF_SIZE];
-  const char *p, *search_type = buf, *file_begin = buf, *file_end = nullptr;
-  int nread = 0;
-  timeval timeout;
-  timeout.tv_sec = request_timeout_milli/1000;
-  timeout.tv_usec = request_timeout_milli%1000*1000;
+protected:
+  bool is_index_mode() const override { return true; }
 
-  for(;;) {
-    fd_set rfds;
-    FD_ZERO(&rfds);
-    FD_SET(data->clifd, &rfds);
-    int res = select(data->clifd+1, &rfds, NULL, NULL, &timeout); // Linux modifies timeout
-    if (res < 0) {
-      if (errno == EINTR) continue;
-      goto quit;
-    }
-    if (! res) // timeout
-      goto quit;
-    int t = read(data->clifd, buf+nread, sizeof buf-nread);
-    if (t < 0) goto quit;
-    if (! t) break;
-    nread += t;
-  }
-
-  for (p = buf; p < buf+sizeof(buf) && *p; p++);
-  if (++p >= buf+sizeof(buf))
-    goto quit;
-  file_begin = p;
-  for (; p < buf+sizeof(buf) && *p; p++);
-  if (++p >= buf+sizeof(buf))
-    goto quit;
-  file_end = p;
-  for (; p < buf+sizeof(buf) && *p; p++);
-  if (++p >= buf+sizeof(buf))
-    goto quit;
-
-  {
-    bool autocomplete = *search_type == '\0';
-    u32 len = buf+nread-p, total = 0, t;
-    if (autocomplete) {
-      typedef tuple<string, u32, string> cand_type;
-      u32 skip = 0;
-      vector<u32> res;
-      vector<cand_type> candidates;
-      for (auto &ne: make_reverse_iterator(data->name2entry)) {
-        const string &name = ne.first;
-        auto entry = ne.second;
-        if (entry->valid && entry->size > 0) {
-          auto old_size = res.size();
-          string pattern = unescape(len, p);
-          entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), true, autocomplete_limit, skip, res);
-          FOR(i, old_size, res.size())
-            candidates.emplace_back(name, res[i], string((char*)entry->mmap+res[i], (char*)entry->mmap+min(long(entry->size), res[i]+len+autocomplete_length)));
-          if (res.size() >= autocomplete_limit) break;
-        }
-      }
-      sort(candidates.begin(), candidates.end());
-      candidates.erase(unique(candidates.begin(), candidates.end(), [](const cand_type &x, const cand_type &y) {
-                              return get<2>(x) == get<2>(y);
-                              }), candidates.end());
-      for (auto &cand: candidates)
-        dprintf(data->clifd, "%s\t%u\t%s\n", get<0>(cand).c_str(), get<1>(cand), escape(get<2>(cand)).c_str()); // may SIGPIPE
-    } else {
-      char *end;
-      errno = 0;
-      u32 skip = strtol(search_type, &end, 0);
-      if (! *end && ! errno) {
-        vector<u32> res;
-        for (auto &ne: make_reverse_iterator(data->name2entry)) {
-          const string &name = ne.first;
-          auto entry = ne.second;
-          if (entry->valid && (! *file_begin || string(file_begin) <= name) && (! *file_end || name <= string(file_end)) && entry->size > 0) {
-            auto old_size = res.size();
-            string pattern = unescape(len, p);
-            total += entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), false, search_limit, skip, res);
-            FOR(i, old_size, res.size())
-              dprintf(data->clifd, "%s\t%u\t%s\t%s\t%s\n", name.c_str(), res[i],
-                      escape(string((char*)entry->mmap+max(res[i]-lcontext_length, 0l), (char*)entry->mmap+res[i])).c_str(),
-                      escape(pattern).c_str(),
-                      escape(string((char*)entry->mmap+res[i]+len, (char*)entry->mmap+min(long(entry->size), res[i]+rcontext_length))).c_str());
-            if (res.size() >= autocomplete_limit) break;
-          }
-        }
-        dprintf(data->clifd, "%u\n", total);
-      }
-    }
-  }
-quit:
-  close(data->clifd);
-  delete data;
-  return NULL;
-}
-
-void server_mode(const string &data_dir)
-{
-  signal(SIGPIPE, SIG_IGN);
-
-  int inotify_fd;
-  map<string, shared_ptr<Entry>> name2entry;
-
-  auto rm_fn = [&](string name) {
-    if (name2entry.count(name)) { // already exists
-      auto old = name2entry[name];
-      old->valid = false;
-      delete old->fm;
-      munmap(old->mmap, old->size);
-      munmap(old->index_mmap, old->index_size);
-      close(old->fd);
-      close(old->index_fd);
-      name2entry.erase(name);
-      log_action("removed %s\n", name.c_str());
-    }
-  };
-
-  auto add_fn = [&](string name) {
-    string index_name = name+index_suffix;
-    auto entry = make_shared<Entry>();
-    entry->valid = true;
-    entry->mmap = MAP_FAILED;
-    entry->index_mmap = MAP_FAILED;
-    errno = 0;
-    if ((entry->fd = open((data_dir+"/"+name).c_str(), O_RDONLY)) < 0)
-      goto quit;
-    if ((entry->index_fd = open((data_dir+"/"+index_name).c_str(), O_RDONLY)) < 0) {
-      if (errno == ENOENT)
-        errno = 0;
-      goto quit;
-    }
-    if ((entry->size = lseek(entry->fd, 0, SEEK_END)) < 0)
-      goto quit;
-    if ((entry->index_size = lseek(entry->index_fd, 0, SEEK_END)) < 0)
-      goto quit;
-    if (entry->size > 0 && (entry->mmap = mmap(NULL, entry->size, PROT_READ, MAP_SHARED, entry->fd, 0)) == MAP_FAILED)
-      goto quit;
-    if (entry->index_size > 0 && (entry->index_mmap = mmap(NULL, entry->index_size, PROT_READ, MAP_SHARED, entry->index_fd, 0)) == MAP_FAILED)
-      goto quit;
-    rm_fn(name);
-    if (entry->index_size < 8) {
-      log_status("invalid index file %s\n", index_name.c_str());
-      goto quit;
-    }
-    if (memcmp(entry->index_mmap, MAGIC_GOOD, 4)) {
-      log_status("index file %s: bad magic\n", index_name.c_str());
-      goto quit;
-    }
-    if (*((int*)entry->index_mmap+1) != entry->size) {
-      log_status("index file %s: wrong length\n", index_name.c_str());
-      goto quit;
-    }
-    if (entry->index_size > 0) {
-      Deserializer ar((char*)entry->index_mmap+strlen(MAGIC_GOOD)+4);
-      entry->fm = new FMIndex;
-      ar & *entry->fm;
-      name2entry[name] = entry;
-      log_action("loaded index for %s\n", name.c_str());
-    }
-    return;
-quit:
-    if (entry->index_mmap != MAP_FAILED)
-      munmap(entry->index_mmap, entry->index_size);
-    if (entry->mmap != MAP_FAILED)
-      munmap(entry->mmap, entry->size);
-    if (entry->index_fd >= 0)
-      close(entry->index_fd);
-    if (entry->fd >= 0)
-      close(entry->fd);
-    if (errno)
-      err_msg("processing index file %s", index_name.c_str());
-  };
-
-  process_dir(data_dir, true, inotify_fd, add_fn);
-  log_status("start inotify\n");
-
-  int sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
-  if (sockfd < 0)
-    err_exit(EX_OSERR, "socket");
-  struct sockaddr_un addr = {};
-  addr.sun_family = AF_UNIX;
-  strncpy(addr.sun_path, listen_path, sizeof(addr.sun_path)-1);
-  unlink(addr.sun_path);
-  if (bind(sockfd, (struct sockaddr *)&addr, sizeof addr) < 0)
-    err_exit(EX_OSERR, "bind");
-  if (listen(sockfd, 1) < 0)
-    err_exit(EX_OSERR, "listen");
-
-  set<string> modified;
-  for(;;) {
-    fd_set rfds;
-    FD_ZERO(&rfds);
-    FD_SET(inotify_fd, &rfds);
-    FD_SET(sockfd, &rfds);
-    int res = select(max(sockfd, inotify_fd)+1, &rfds, NULL, NULL, NULL);
-    if (res < 0) {
-      if (errno == EINTR) continue;
-      err_exit(EX_OSERR, "select");
-    }
-    if (FD_ISSET(inotify_fd, &rfds))
-      process_inotify(data_dir, inotify_fd, false, modified, add_fn, rm_fn);
-    if (FD_ISSET(sockfd, &rfds)) {
-      int clifd = accept(sockfd, NULL, NULL);
-      if (clifd < 0)
-        err_exit(EX_OSERR, "accept");
-      pthread_t tid;
-      pthread_attr_t attr;
-      pthread_attr_init(&attr);
-      if (pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED))
-        err_exit(EX_OSERR, "pthread_attr_setdetachstate");
-      auto worker = new Worker;
-      worker->clifd = clifd;
-      worker->name2entry = name2entry; // make a copy of name2entry to prevent race condition
-      pthread_create(&tid, &attr, (void*(*)(void*))serve_client, worker);
-      pthread_attr_destroy(&attr);
-    }
-  }
-}
-
-void index_mode(const string &data_dir, bool do_inotify)
-{
-  int inotify_fd;
-
-  auto add_fn = [&](string name) {
+  void add_data(string name) override {
     string index_name = name+index_suffix;
     int index_fd = -1, pcap_fd = -1;
     off_t pcap_size;
     void *pcap_content = MAP_FAILED;
     FILE *fh = NULL;
     errno = 0;
-    if ((pcap_fd = open((data_dir+"/"+name).c_str(), O_RDONLY)) < 0)
+    if ((pcap_fd = open_data(name)) < 0)
       goto quit;
     if ((pcap_size = lseek(pcap_fd, 0, SEEK_END)) < 0)
       goto quit;
-    if ((index_fd = open((data_dir+"/"+index_name).c_str(), O_RDWR | O_CREAT, 0666)) < 0)
+    if ((index_fd = open_index(index_name, O_RDWR | O_CREAT, 0666)) < 0)
       goto quit;
     {
       char buf[8];
@@ -1690,10 +1498,10 @@ void index_mode(const string &data_dir, bool do_inotify)
       fputs(MAGIC_GOOD, fh);
       fwrite(&pcap_size, 4, 1, fh);
       if (ferror(fh)) {
-        unlink((data_dir+"/"+index_name).c_str());
-        err_exit(EX_IOERR, "failed to process pcap file %s", name.c_str());
+        unlink(to_path(index_name).c_str());
+        goto quit;
       }
-      log_action("created index for %s. origin: %ld, index: %ld, used %.3lf s\n", name.c_str(), pcap_size, index_size, sw.elapsed());
+      log_action("created index for %s. data: %ld, index: %ld, used %.3lf s\n", name.c_str(), pcap_size, index_size, sw.elapsed());
     }
 quit:
     if (fh)
@@ -1705,19 +1513,19 @@ quit:
     if (pcap_fd >= 0)
       close(pcap_fd);
     if (errno)
-      err_msg("failed to process pcap file %s", name.c_str());
-  };
+      err_msg("failed to index %s", name.c_str());
+  }
 
-  auto rm_fn = [&](string name) {
-    string path = data_dir+"/"+name+index_suffix;
-    unlink(path.c_str());
-    log_action("unlinked %s\n", path.c_str());
-  };
+  void rm_data(string name) override {
+    string index_path = to_path(name+index_suffix);
+    if (! unlink(index_path.c_str()))
+      log_action("unlinked %s\n", index_path.c_str());
+  }
 
-  process_dir(data_dir, do_inotify, inotify_fd, add_fn);
-
-  set<string> modified;
-  if (do_inotify) {
+public:
+  void run() {
+    process_dir();
+    if (! do_inotify) return;
     log_status("start inotify\n");
     fd_set rfds;
     for(;;) {
@@ -1728,10 +1536,232 @@ quit:
         if (errno == EINTR) continue;
         err_exit(EX_OSERR, "select");
       }
-      process_inotify(data_dir, inotify_fd, true, modified, add_fn, rm_fn);
+      process_inotify();
     }
   }
-}
+};
+
+class Server : public Processor
+{
+protected:
+  map<string, shared_ptr<Entry>> name2entry_;
+
+  struct WorkerData
+  {
+    int clifd;
+    map<string, shared_ptr<Entry>> name2entry;
+  };
+
+  bool is_index_mode() const override { return false; }
+
+  void add_data(string name) override {
+    string index_name = name+index_suffix;
+    auto entry = make_shared<Entry>();
+    entry->mmap = MAP_FAILED;
+    entry->index_mmap = MAP_FAILED;
+    errno = 0;
+    if ((entry->fd = open_data(name)) < 0)
+      goto quit;
+    if ((entry->index_fd = open_index(index_name, O_RDONLY)) < 0) {
+      if (errno == ENOENT) {
+        errno = 0;
+        log_status("skiping %s: no index\n", name.c_str());
+      }
+      goto quit;
+    }
+    if ((entry->size = lseek(entry->fd, 0, SEEK_END)) < 0)
+      goto quit;
+    if ((entry->index_size = lseek(entry->index_fd, 0, SEEK_END)) < 0)
+      goto quit;
+    if (entry->size > 0 && (entry->mmap = mmap(NULL, entry->size, PROT_READ, MAP_SHARED, entry->fd, 0)) == MAP_FAILED)
+      goto quit;
+    if (entry->index_size > 0 && (entry->index_mmap = mmap(NULL, entry->index_size, PROT_READ, MAP_SHARED, entry->index_fd, 0)) == MAP_FAILED)
+      goto quit;
+    rm_data(name);
+    if (entry->index_size < 8) {
+      log_status("invalid index file %s: length < 8\n", index_name.c_str());
+      goto quit;
+    }
+    if (memcmp(entry->index_mmap, MAGIC_GOOD, 4)) {
+      log_status("index file %s: bad magic\n", index_name.c_str());
+      goto quit;
+    }
+    if (*((int*)entry->index_mmap+1) != entry->size) {
+      log_status("index file %s: mismatching length of data file\n", index_name.c_str());
+      goto quit;
+    }
+    if (entry->index_size > 0) {
+      Deserializer ar((char*)entry->index_mmap+strlen(MAGIC_GOOD)+4);
+      entry->fm = new FMIndex;
+      ar & *entry->fm;
+      name2entry_[name] = entry;
+      log_action("loaded index for %s\n", name.c_str());
+    }
+    return;
+quit:
+    if (entry->index_mmap != MAP_FAILED)
+      munmap(entry->index_mmap, entry->index_size);
+    if (entry->mmap != MAP_FAILED)
+      munmap(entry->mmap, entry->size);
+    if (entry->index_fd >= 0)
+      close(entry->index_fd);
+    if (entry->fd >= 0)
+      close(entry->fd);
+    if (errno)
+      err_msg("failed to load index file %s", index_name.c_str());
+  }
+
+  void rm_data(string name) override {
+    if (name2entry_.count(name)) {
+      name2entry_.erase(name);
+      log_action("no serving %s\n", name.c_str());
+    }
+  }
+
+public:
+  void run() {
+    signal(SIGPIPE, SIG_IGN); // SIGPIPE while writing to clients
+
+    int sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sockfd < 0)
+      err_exit(EX_OSERR, "socket");
+    struct sockaddr_un addr = {};
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, listen_path, sizeof(addr.sun_path)-1);
+    unlink(addr.sun_path);
+    if (bind(sockfd, (struct sockaddr *)&addr, sizeof addr) < 0)
+      err_exit(EX_OSERR, "bind");
+    if (listen(sockfd, 1) < 0)
+      err_exit(EX_OSERR, "listen");
+
+    process_dir();
+    log_status("start inotify\n");
+
+    for(;;) {
+      fd_set rfds;
+      FD_ZERO(&rfds);
+      FD_SET(inotify_fd, &rfds);
+      FD_SET(sockfd, &rfds);
+      int res = select(max(sockfd, inotify_fd)+1, &rfds, NULL, NULL, NULL);
+      if (res < 0) {
+        if (errno == EINTR) continue;
+        err_exit(EX_OSERR, "select");
+      }
+      if (FD_ISSET(inotify_fd, &rfds))
+        process_inotify();
+      if (FD_ISSET(sockfd, &rfds)) {
+        int clifd = accept(sockfd, NULL, NULL);
+        if (clifd < 0)
+          err_exit(EX_OSERR, "accept");
+        pthread_t tid;
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        if (pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED))
+          err_exit(EX_OSERR, "pthread_attr_setdetachstate");
+        auto wd = new WorkerData;
+        wd->clifd = clifd;
+        wd->name2entry = name2entry_; // make a copy of name2entry to prevent race condition
+        pthread_create(&tid, &attr, worker, wd);
+        pthread_attr_destroy(&attr);
+      }
+    }
+  }
+
+  static void *worker(void *data_) {
+    auto data = (WorkerData *)data_;
+    char buf[BUF_SIZE];
+    const char *p, *search_type = buf, *file_begin = buf, *file_end = nullptr;
+    int nread = 0;
+    timeval timeout;
+    timeout.tv_sec = request_timeout_milli/1000;
+    timeout.tv_usec = request_timeout_milli%1000*1000;
+
+    for(;;) {
+      fd_set rfds;
+      FD_ZERO(&rfds);
+      FD_SET(data->clifd, &rfds);
+      int res = select(data->clifd+1, &rfds, NULL, NULL, &timeout); // Linux modifies timeout
+      if (res < 0) {
+        if (errno == EINTR) continue;
+        goto quit;
+      }
+      if (! res) // timeout
+        goto quit;
+      int t = read(data->clifd, buf+nread, sizeof buf-nread);
+      if (t < 0) goto quit;
+      if (! t) break;
+      nread += t;
+    }
+
+    for (p = buf; p < buf+sizeof(buf) && *p; p++);
+    if (++p >= buf+sizeof(buf))
+      goto quit;
+    file_begin = p;
+    for (; p < buf+sizeof(buf) && *p; p++);
+    if (++p >= buf+sizeof(buf))
+      goto quit;
+    file_end = p;
+    for (; p < buf+sizeof(buf) && *p; p++);
+    if (++p >= buf+sizeof(buf))
+      goto quit;
+
+    {
+      bool autocomplete = *search_type == '\0';
+      u32 len = buf+nread-p, total = 0, t;
+      if (autocomplete) {
+        typedef tuple<string, u32, string> cand_type;
+        u32 skip = 0;
+        vector<u32> res;
+        vector<cand_type> candidates;
+        for (auto &ne: make_reverse_iterator(data->name2entry)) {
+          const string &name = ne.first;
+          auto entry = ne.second;
+          if (entry->size > 0) {
+            auto old_size = res.size();
+            string pattern = unescape(len, p);
+            entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), true, autocomplete_limit, skip, res);
+            FOR(i, old_size, res.size())
+              candidates.emplace_back(name, res[i], string((char*)entry->mmap+res[i], (char*)entry->mmap+min(long(entry->size), res[i]+len+autocomplete_length)));
+            if (res.size() >= autocomplete_limit) break;
+          }
+        }
+        sort(candidates.begin(), candidates.end());
+        candidates.erase(unique(candidates.begin(), candidates.end(), [](const cand_type &x, const cand_type &y) {
+                                return get<2>(x) == get<2>(y);
+                                }), candidates.end());
+        for (auto &cand: candidates)
+          dprintf(data->clifd, "%s\t%u\t%s\n", get<0>(cand).c_str(), get<1>(cand), escape(get<2>(cand)).c_str()); // may SIGPIPE
+      } else {
+        char *end;
+        errno = 0;
+        u32 skip = strtol(search_type, &end, 0);
+        if (! *end && ! errno) {
+          vector<u32> res;
+          for (auto &ne: make_reverse_iterator(data->name2entry)) {
+            const string &name = ne.first;
+            auto entry = ne.second;
+            if ((! *file_begin || string(file_begin) <= name) && (! *file_end || name <= string(file_end)) && entry->size > 0) {
+              auto old_size = res.size();
+              string pattern = unescape(len, p);
+              total += entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), false, search_limit, skip, res);
+              FOR(i, old_size, res.size())
+                dprintf(data->clifd, "%s\t%u\t%s\t%s\t%s\n", name.c_str(), res[i],
+                        escape(string((char*)entry->mmap+max(res[i]-lcontext_length, 0l), (char*)entry->mmap+res[i])).c_str(),
+                        escape(pattern).c_str(),
+                        escape(string((char*)entry->mmap+res[i]+len, (char*)entry->mmap+min(long(entry->size), res[i]+rcontext_length))).c_str());
+              if (res.size() >= autocomplete_limit) break;
+            }
+          }
+          dprintf(data->clifd, "%u\n", total);
+        }
+      }
+    }
+quit:
+    close(data->clifd);
+    delete data;
+    return NULL;
+  }
+};
 
 int main(int argc, char *argv[])
 {
@@ -1804,7 +1834,7 @@ int main(int argc, char *argv[])
   }
   if (optind+1 != argc)
     print_help(stderr);
-  const char *data_dir = argv[optind];
+  data_dir = argv[optind];
 
 #define D(name) printf("%s: %ld\n", #name, name)
 
@@ -1812,7 +1842,7 @@ int main(int argc, char *argv[])
     log_status("index mode\n");
     D(fmindex_sample_rate);
     D(rrr_sample_rate);
-    index_mode(data_dir, do_inotify);
+    Indexer().run();
   } else {
     log_status("server mode\n");
     D(autocomplete_length);
@@ -1820,7 +1850,7 @@ int main(int argc, char *argv[])
     D(lcontext_length);
     D(rcontext_length);
     D(search_limit);
-    server_mode(data_dir);
+    Server().run();
   }
 
 #undef D
