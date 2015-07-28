@@ -144,6 +144,7 @@ get '/api/search' do
       qq = q.gsub(/\\[0-7]{1,3}/) {|match|
         "\\x#{'%02x' % match[1..-1].to_i(8)}"
       }
+      .gsub('\\\\', '\\x5c')
       .gsub('\\a', '\\x07')
       .gsub('\\b', '\\x08')
       .gsub('\\t', '\\x09')
@@ -151,7 +152,6 @@ get '/api/search' do
       .gsub('\\v', '\\x0b')
       .gsub('\\f', '\\x0c')
       .gsub('\\r', '\\x0d')
-      .gsub('\\', '\\x5c')
 
       res = []
       IO.popen [File.join(DSHELL_DEFCON, 'context.py')], 'r+' do |h|
