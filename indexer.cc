@@ -1185,6 +1185,16 @@ public:
     return x.second-x.first;
   }
 
+  u32 calc_sa(u32 rank) const {
+    u32 d = 0, i = rank;
+    while (! sampled_ef_.exist(i)) {
+      int c = bwt_wm_[i + (i < initial_)];
+      i = cnt_lt_[c] + bwt_wm_.rank(c, i + (i < initial_));
+      d++;
+    }
+    return ssa_[sampled_ef_.rank(i)] + d;
+  }
+
   u32 locate(u32 m, const u8 *pattern, bool autocomplete, u32 limit, u32 &skip, vector<u32> &res) const {
     u32 l, h, total;
     if (m) {
@@ -1211,9 +1221,6 @@ public:
       res.push_back(pos);
     }
     return total;
-  }
-
-  void autocomplete(const u8 *text, u32 m, const u8 *pattern, u32 limit, vector<u32> &res) const {
   }
 
   template<typename Archive>
