@@ -20,6 +20,11 @@ def enc(s):
             ss += "\\x" + i.encode('hex')
     return ss
 
+dir2arrow = {
+        'c': u"\u2190".encode('utf-8'),
+        's': u"\u2192".encode('utf-8')
+        }
+
 
 def context(fname, offset, len_body):
     ff = open(fname, 'rb')
@@ -46,18 +51,19 @@ def context(fname, offset, len_body):
                 data = ff.read(len_data)
                 data_end = ff.tell()
                 if outputed >= 0 and outputed < rcontext:
-                    output_data += data[:rcontext - outputed]
+                    output_data += dir2arrow[direction] + enc(data[:rcontext - outputed])
                 if data_begin <= offset < data_end:
                     output_data = data[offset - data_begin: offset - data_begin + len_body]
                     blobr = data[offset - data_begin + len_body: ]
                     blobl = data[: offset - data_begin]
-                    output_data = blobl[-lcontext: ] + output_data + blobr[: rcontext]
+                    output_data = dir2arrow[direction] + enc(blobl[-lcontext: ] + output_data + blobr[: rcontext])
                     if len(blobl) < lcontext:
-                        output_data = last_blob[-(lcontext - len(blobl)): ] + output_data
+                        output_data = dir2arrow[last_dir] + enc(last_blob[-(lcontext - len(blobl)): ]) + output_data
                     outputed = len(blobr)
                 last_blob = data
+                last_dir = direction
             ff.close()
-            return timestamp, servport, cliport, enc(output_data)
+            return timestamp, servport, cliport, output_data
         current_offset += i
 
     ff.close()
