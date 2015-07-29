@@ -84,27 +84,45 @@ def out_begin_python(*args):
     _out_file = open(sys.argv[5], 'wb')
     print >>_out_file, '#!/usr/bin/env python2'
     print >>_out_file, '#-*- coding:utf-8 -*-'
-    print >>_out_file, 'try: from termcolor import colored'
-    print >>_out_file, 'except:'
-    print >>_out_file, '    def colored(text, color=None, on_color=None, attrs=None):'
-    print >>_out_file, '        return text'
-    print >>_out_file, 'peers = [{}, {}]'
-    print >>_out_file, 'seq = []'
-    print >>_out_file, 'idx = 0'
+    print >>_out_file, 'import zio'
+    print >>_out_file, 'import sys'
+    print >>_out_file, 'timeout = 0.5'
+    print >>_out_file, 'print "Usage: %s <host> <port> [id]\\n\\ti: interact at end\\n\\td: diff response and expected response" % (sys.argv[0])'
+    print >>_out_file, 'def diffstr(content, expected):'
+    print >>_out_file, '    try:'
+    print >>_out_file, '        from termcolor import colored'
+    print >>_out_file, '    except:'
+    print >>_out_file, '        return'
+    print >>_out_file, '    if len(sys.argv) >= 4 and "d" in sys.argv[3]:'
+    print >>_out_file, '        import difflib'
+    print >>_out_file, '        differ = difflib.ndiff(expected, content)'
+    print >>_out_file, '        for i in differ:'
+    print >>_out_file, '            text = repr(i[-1])[1:-1]'
+    print >>_out_file, '            if i[0] == " ":'
+    print >>_out_file, '                sys.stdout.write(text)'
+    print >>_out_file, '            if i[0] == "+":'
+    print >>_out_file, '                sys.stdout.write(colored(text, on_color="on_red"))'
+    print >>_out_file, '            if i[0] == "-":'
+    print >>_out_file, '                sys.stdout.write(colored(text, on_color="on_blue"))'
+    print >>_out_file, '        sys.stdout.write("\\n")'
+    print >>_out_file, '        sys.stdout.flush()'
+    print >>_out_file, 'z = zio.zio((sys.argv[1], int(sys.argv[2])), print_read=zio.COLORED(zio.REPR, "cyan"), print_write=zio.COLORED(zio.REPR, "green"))'
+    print >>_out_file, '__content = ""'
 
 
 def out_end_python():
-    print >>_out_file, "colors = ['cyan', 'yellow']"
-    print >>_out_file, 'for s, o in seq: print colored(repr(peers[s][o]), colors[s])'
+    print >>_out_file, 'if len(sys.argv) >= 4 and "i" in sys.argv[3]:'
+    print >>_out_file, '    z.interact()'
     if _out_file != sys.stdout:
         _out_file.close()
 
 def out_python(srcip, srcport, destip, dstport, data, direction, ff):
-    _idir = {'sc': 0, 'cs': 1}
-    idir = _idir[direction]
-    print >>_out_file, "idx += 1"
-    print >>_out_file, "peers[%d][idx] = %s" % (idir, repr(data))
-    print >>_out_file, "seq.append((%d, idx))" % (idir)
+    if direction == 'cs':
+        print >>_out_file, "z.write(%s)" % (repr(data))
+    else:
+        print >>_out_file, "__content = z.read_until_timeout(timeout = timeout)"
+        print >>_out_file, "__expected =  %s" % (repr(data))
+        print >>_out_file, "diffstr(__content, __expected)"
 
 
 def out_begin_pcap(_pkts, timestamp):
