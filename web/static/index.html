@@ -206,7 +206,7 @@
                 <div class="item" each={packs} if={test_port(this)}>
                   <div class="right floated content">
                     <a class="ui button" href={download(file, offset, 'pcap')} target="_blank">PCAP</a>
-                    <div class="ui button" onclick={open.bind(root, this)}>View</div>
+                    <div class="ui button" onclick={open}>View</div>
                   </div>
                   <div class="middle aligned content">
                     <span class="line-number">{offset}</span><span class="ui label">Sever:{port0}</span><span class="ui label">Client:{port1}</span> <span class="ui label">{epoch}</span>
@@ -259,7 +259,7 @@
           if( totalHeight - scrollTop - clientHeight < clientHeight*0.5 && !$('.modal.ui').modal('is active') && !$('body').hasClass("none") && this.page != undefined && !this.loading){
             this.next_page()
             console.log('next page')
-            this.update()
+            // this.update()
           }
         }.bind(this))
       }.bind(this))
@@ -296,7 +296,8 @@
           return true;
         }
       }
-      open(context){
+      open(context, e){
+        console.log(e.item)
         var file = context.parent.file,
             offset = context.offset;
         // clean the original data
@@ -330,7 +331,7 @@
           this.python = response.split("--------------------------------------------\n")
           this.update()
         }.bind(this), 'text')
-      }
+      }.bind(this)
       show_complete(e){
         var input_text = e.target.value;
         console.log(input_text);
@@ -340,8 +341,12 @@
         if(e.which == 13){
           var keyword = e.target.value;
           //hide the auto complete
-          $('.ui.search').search('hide results')
           this.search(keyword)
+          setTimeout(function(){
+            $('.ui.search').search('hide results')
+            $('#input_port').focus()
+          }, 10)
+
         }else{
           return true
         }
@@ -371,7 +376,6 @@
           this.keyword = response.query // use the server side query to avoid different escaped type
           this.page = page
           this.update()
-          $('.ui.search').search('hide results')
         }.bind(this), 'json')
       }
       next_page(){
