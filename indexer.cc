@@ -66,7 +66,7 @@ const char MAGIC_GOOD[] = "GOOD";
 
 const size_t BUF_SIZE = 512;
 const char *listen_path = "/tmp/search.sock";
-const char *data_dir;
+vector<const char *> data_dir;
 string data_suffix = ".ap";
 string index_suffix = ".fm";
 long autocomplete_limit = 20;
@@ -1358,23 +1358,22 @@ struct Entry
   }
 };
 
-bool is_data(const string &name)
+bool is_data(const string &path)
 {
-  return name.size() >= data_suffix.size() && name.substr(name.size()-data_suffix.size()) == data_suffix;
+  return path.size() >= data_suffix.size() && path.substr(path.size()-data_suffix.size()) == data_suffix;
 }
 
-bool is_index(const string &name)
+bool is_index(const string &path)
 {
-  return name.size() >= index_suffix.size() && name.substr(name.size()-index_suffix.size()) == index_suffix;
+  return path.size() >= index_suffix.size() && path.substr(path.size()-index_suffix.size()) == index_suffix;
 }
 
 class Processor
 {
-public:
-  set<string> modified_;
-  virtual ~Processor() {}
 protected:
   int inotify_fd;
+  set<string> modified_;
+  map<int, const char *> wd2dir_;
 
   virtual bool is_index_mode() const = 0;
 
@@ -1382,35 +1381,41 @@ protected:
 
   virtual void rm_data(const string &) = 0;
 
-  string to_path(const string &name) const {
-    return string(data_dir)+"/"+name;
+  string to_path(const char *dir, const string &name) const {
+    return string(dir)+"/"+name;
   }
 
-  int open_data(const string &name) const {
-    return open(to_path(name).c_str(), O_RDONLY);
+  int open_data(const string &path) const {
+    return open(path.c_str(), O_RDONLY);
   }
 
-  int open_index(const string &index_name, int flags, mode_t mode = 0) const {
-    return open(to_path(index_name).c_str(), flags, mode);
+  int open_index(const string &path, int flags, mode_t mode = 0) const {
+    return open(path.c_str(), flags, mode);
   }
 
   void process_dir() {
     if (do_inotify) {
       if ((inotify_fd = inotify_init()) < 0)
         err_exit(EX_USAGE, "inotify_init");
-      if (inotify_add_watch(inotify_fd, data_dir, IN_CLOSE_WRITE | IN_CREATE | IN_DELETE | IN_MODIFY | IN_MOVE) < 0)
-        err_exit(EX_USAGE, "inotify_add_watch");
+      for (auto dir: data_dir) {
+        int wd = inotify_add_watch(inotify_fd, dir, IN_CLOSE_WRITE | IN_CREATE | IN_DELETE | IN_MODIFY | IN_MOVE);
+        if (wd < 0)
+          err_exit(EX_USAGE, "inotify_add_watch");
+        wd2dir_[wd] = dir;
+      }
     }
-    DIR *dir = opendir(data_dir);
-    if (! dir)
-      err_exit(EX_OSERR, "opendir");
-    struct dirent dirent, *res;
-    while (readdir_r(dir, &dirent, &res) == 0 && res) {
-      string name = dirent.d_name;
-      if (is_data(name))
-        add_data(name);
+    for (auto dir: data_dir) {
+      DIR *dirp = opendir(dir);
+      if (! dirp)
+        err_exit(EX_OSERR, "opendir");
+      struct dirent dirent, *res;
+      while (readdir_r(dirp, &dirent, &res) == 0 && res) {
+        string path = to_path(dir, dirent.d_name);
+        if (is_data(path))
+          add_data(path);
+      }
+      closedir(dirp);
     }
-    closedir(dir);
   }
 
   void process_inotify() {
@@ -1420,41 +1425,43 @@ protected:
       err_exit(EX_OSERR, "failed to read inotify fd");
     for (auto *ev = (inotify_event *)buf; (char *)ev < (char *)buf+nread;
          ev = (inotify_event *)((char *)ev + sizeof(inotify_event) + ev->len))
-      if (ev->len > 0)
+      if (ev->len > 0) {
+        const char *dir = wd2dir_[ev->wd];
         if (is_index_mode() ? is_data(ev->name) : is_index(ev->name)) {
-          string name = ev->name;
+          string path = to_path(dir, ev->name);
           if (! is_index_mode())
-            name = name.substr(0, name.size()-index_suffix.size());
+            path = path.substr(0, path.size()-index_suffix.size()); // to data file path
           if (ev->mask & IN_CREATE) {
             struct stat statbuf;
-            log_event("CREATE %s\n", name.c_str());
-            if (lstat(to_path(name).c_str(), &statbuf) < 0) continue;
+            log_event("CREATE %s\n", path.c_str());
+            if (lstat(path.c_str(), &statbuf) < 0) continue;
             if (S_IFLNK & statbuf.st_mode) {
-              modified_.erase(name);
-              add_data(name);
+              modified_.erase(path);
+              add_data(path);
             } else if (S_IFREG & statbuf.st_mode)
-              modified_.insert(name);
+              modified_.insert(path);
           } else if (ev->mask & IN_DELETE) {
-            log_event("DELETE %s\n", name.c_str());
-            modified_.erase(name);
-            rm_data(name);
+            log_event("DELETE %s\n", path.c_str());
+            modified_.erase(path);
+            rm_data(path);
           } else if (ev->mask & IN_MOVED_FROM) {
-            log_event("MOVED_FROM %s\n", name.c_str());
-            modified_.erase(name);
-            rm_data(name);
+            log_event("MOVED_FROM %s\n", path.c_str());
+            modified_.erase(path);
+            rm_data(path);
           } else if (ev->mask & IN_MOVED_TO) {
-            log_event("MOVED_TO %s\n", name.c_str());
-            add_data(name);
+            log_event("MOVED_TO %s\n", path.c_str());
+            add_data(path);
           } else if (ev->mask & IN_MODIFY)
-            modified_.insert(name);
+            modified_.insert(path);
           else if (ev->mask & IN_CLOSE_WRITE) {
-            if (modified_.count(name)) {
-              modified_.erase(name);
-              log_event("CLOSE_WRITE after MODIFY %s\n", name.c_str());
-              add_data(name);
+            if (modified_.count(path)) {
+              modified_.erase(path);
+              log_event("CLOSE_WRITE after MODIFY %s\n", path.c_str());
+              add_data(path);
             }
           }
         }
+      }
   }
 };
 
@@ -1463,18 +1470,18 @@ class Indexer : public Processor
 protected:
   bool is_index_mode() const override { return true; }
 
-  void add_data(const string &name) override {
-    string index_name = name+index_suffix;
+  void add_data(const string &data_path) override {
+    string index_path = data_path+index_suffix;
     int index_fd = -1, pcap_fd = -1;
     off_t pcap_size;
     void *pcap_content = MAP_FAILED;
     FILE *fh = NULL;
     errno = 0;
-    if ((pcap_fd = open_data(name)) < 0)
+    if ((pcap_fd = open_data(data_path)) < 0)
       goto quit;
     if ((pcap_size = lseek(pcap_fd, 0, SEEK_END)) < 0)
       goto quit;
-    if ((index_fd = open_index(index_name, O_RDWR | O_CREAT, 0666)) < 0)
+    if ((index_fd = open_index(index_path, O_RDWR | O_CREAT, 0666)) < 0)
       goto quit;
     {
       char buf[8];
@@ -1485,9 +1492,9 @@ protected:
       if (nread == 0)
        ;
       else if (nread < 4 || memcmp(buf, MAGIC_GOOD, 4))
-        log_status("index file %s: bad magic. rebuilding\n", index_name.c_str());
+        log_status("index file %s: bad magic. rebuilding\n", index_path.c_str());
       else if (nread < 8 || *((int*)buf+1) != pcap_size)
-        log_status("index file %s: mismatching length of data file. rebuilding\n", index_name.c_str());
+        log_status("index file %s: mismatching length of data file. rebuilding\n", index_path.c_str());
       else
         goto quit;
     }
@@ -1513,10 +1520,10 @@ protected:
       fputs(MAGIC_GOOD, fh);
       fwrite(&pcap_size, 4, 1, fh);
       if (ferror(fh)) {
-        unlink(to_path(index_name).c_str());
+        unlink(index_path.c_str());
         goto quit;
       }
-      log_action("created index for %s. data: %ld, index: %ld, used %.3lf s\n", name.c_str(), pcap_size, index_size, sw.elapsed());
+      log_action("created index for %s. data: %ld, index: %ld, used %.3lf s\n", data_path.c_str(), pcap_size, index_size, sw.elapsed());
     }
 quit:
     if (fh)
@@ -1528,13 +1535,15 @@ quit:
     if (pcap_fd >= 0)
       close(pcap_fd);
     if (errno)
-      err_msg("failed to index %s", name.c_str());
+      err_msg("failed to index %s", data_path.c_str());
   }
 
-  void rm_data(const string &name) override {
-    string index_path = to_path(name+index_suffix);
+  void rm_data(const string &data_path) override {
+    string index_path = data_path+index_suffix;
     if (! unlink(index_path.c_str()))
       log_action("unlinked %s\n", index_path.c_str());
+    else if (errno != ENOENT)
+      err_msg("failed to unlink %s", index_path.c_str());
   }
 
 public:
@@ -1559,28 +1568,28 @@ public:
 class Server : public Processor
 {
 protected:
-  map<string, shared_ptr<Entry>> name2entry_;
+  map<string, shared_ptr<Entry>> path2entry_;
 
   struct WorkerData
   {
     int clifd;
-    map<string, shared_ptr<Entry>> name2entry;
+    map<string, shared_ptr<Entry>> path2entry;
   };
 
   bool is_index_mode() const override { return false; }
 
-  void add_data(const string &name) override {
-    string index_name = name+index_suffix;
+  void add_data(const string &data_path) override {
+    string index_path = data_path+index_suffix;
     auto entry = make_shared<Entry>();
     entry->mmap = MAP_FAILED;
     entry->index_mmap = MAP_FAILED;
     errno = 0;
-    if ((entry->fd = open_data(name)) < 0)
+    if ((entry->fd = open_data(data_path)) < 0)
       goto quit;
-    if ((entry->index_fd = open_index(index_name, O_RDONLY)) < 0) {
+    if ((entry->index_fd = open_index(index_path, O_RDONLY)) < 0) {
       if (errno == ENOENT) {
         errno = 0;
-        log_status("skiping %s: no index\n", name.c_str());
+        log_status("skiping %s: no index\n", data_path.c_str());
       }
       goto quit;
     }
@@ -1592,25 +1601,25 @@ protected:
       goto quit;
     if (entry->index_size > 0 && (entry->index_mmap = mmap(NULL, entry->index_size, PROT_READ, MAP_SHARED, entry->index_fd, 0)) == MAP_FAILED)
       goto quit;
-    rm_data(name);
+    rm_data(data_path);
     if (entry->index_size < 8) {
-      log_status("invalid index file %s: length < 8\n", index_name.c_str());
+      log_status("invalid index file %s: length < 8\n", index_path.c_str());
       goto quit;
     }
     if (memcmp(entry->index_mmap, MAGIC_GOOD, 4)) {
-      log_status("index file %s: bad magic\n", index_name.c_str());
+      log_status("index file %s: bad magic\n", index_path.c_str());
       goto quit;
     }
     if (*((int*)entry->index_mmap+1) != entry->size) {
-      log_status("index file %s: mismatching length of data file\n", index_name.c_str());
+      log_status("index file %s: mismatching length of data file\n", index_path.c_str());
       goto quit;
     }
     if (entry->index_size > 0) {
       Deserializer ar((char*)entry->index_mmap+strlen(MAGIC_GOOD)+4);
       entry->fm = new FMIndex;
       ar & *entry->fm;
-      name2entry_[name] = entry;
-      log_action("loaded index for %s\n", name.c_str());
+      path2entry_[data_path] = entry;
+      log_action("loaded index for %s\n", data_path.c_str());
     }
     return;
 quit:
@@ -1623,13 +1632,13 @@ quit:
     if (entry->fd >= 0)
       close(entry->fd);
     if (errno)
-      err_msg("failed to load index file %s", index_name.c_str());
+      err_msg("failed to load index file %s", index_path.c_str());
   }
 
-  void rm_data(const string &name) override {
-    if (name2entry_.count(name)) {
-      name2entry_.erase(name);
-      log_action("no serving %s\n", name.c_str());
+  void rm_data(const string &data_path) override {
+    if (path2entry_.count(data_path)) {
+      path2entry_.erase(data_path);
+      log_action("no serving %s\n", data_path.c_str());
     }
   }
 
@@ -1652,7 +1661,7 @@ public:
     process_dir();
     log_status("start inotify\n");
 
-    for (; request_count; request_count > 0 && request_count--) {
+    while (request_count) {
       fd_set rfds;
       FD_ZERO(&rfds);
       FD_SET(inotify_fd, &rfds);
@@ -1675,17 +1684,17 @@ public:
           err_exit(EX_OSERR, "pthread_attr_setdetachstate");
         auto wd = new WorkerData;
         wd->clifd = clifd;
-        wd->name2entry = name2entry_; // make a copy of name2entry to prevent race condition
+        wd->path2entry = path2entry_; // make a copy of path2entry to prevent race condition
         pthread_create(&tid, &attr, worker, wd);
         pthread_attr_destroy(&attr);
         ongoing_requests++;
+        request_count && request_count--;
       }
     }
     close(inotify_fd);
     close(sockfd);
-    while (ongoing_requests.load() > 0) {
+    while (ongoing_requests.load() > 0)
       sleep(1);
-    }
   }
 
   static void *worker(void *data_) {
@@ -1734,7 +1743,7 @@ public:
         u32 skip = 0;
         vector<u32> res;
         vector<cand_type> candidates;
-        for (auto &ne: make_reverse_iterator(data->name2entry)) {
+        for (auto &ne: make_reverse_iterator(data->path2entry)) {
           const string &name = ne.first;
           auto entry = ne.second;
           if (entry->size > 0) {
@@ -1759,15 +1768,15 @@ public:
         u32 skip = strtol(search_type, &end, 0);
         if (! *end && ! errno) {
           vector<u32> res;
-          for (auto &ne: make_reverse_iterator(data->name2entry)) {
-            const string &name = ne.first;
+          for (auto &ne: make_reverse_iterator(data->path2entry)) {
+            const string &data_path = ne.first;
             auto entry = ne.second;
-            if ((! *file_begin || string(file_begin) <= name) && (! *file_end || name <= string(file_end)) && entry->size > 0) {
+            if ((! *file_begin || string(file_begin) <= data_path) && (! *file_end || data_path <= string(file_end)) && entry->size > 0) {
               auto old_size = res.size();
               string pattern = unescape(len, p);
               total += entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), false, search_limit, skip, res);
               FOR(i, old_size, res.size())
-                if (dprintf(data->clifd, "%s\t%u\t%u\n", name.c_str(), res[i], len) < 0)
+                if (dprintf(data->clifd, "%s\t%u\t%u\n", data_path.c_str(), res[i], len) < 0)
                   goto quit;
               if (res.size() >= autocomplete_limit) break;
             }
@@ -1791,8 +1800,8 @@ int main(int argc, char *argv[])
 
   int opt;
   static struct option long_options[] = {
-    {"autocomplete-length", required_argument, 0,   1},
-    {"autocomplete-limit",  required_argument, 0,   2},
+    {"autocomplete-length", required_argument, 0,   2},
+    {"autocomplete-limit",  required_argument, 0,   3},
     {"data-suffix",         required_argument, 0,   's'},
     {"fmindex-sample-rate", required_argument, 0,   'f'},
     {"help",                no_argument,       0,   'h'},
@@ -1806,12 +1815,21 @@ int main(int argc, char *argv[])
     {0,                     0,                 0,   0},
   };
 
-  while ((opt = getopt_long(argc, argv, "c:f:hil:or:p:s:S:", long_options, NULL)) != -1) {
+  while ((opt = getopt_long(argc, argv, "-c:f:hil:or:p:s:S:", long_options, NULL)) != -1) {
     switch (opt) {
-    case 1:
+    case 1: {
+      struct stat statbuf;
+      if (stat(optarg, &statbuf) < 0)
+        err_exit(EX_OSFILE, "stat");
+      if (! (statbuf.st_mode & S_IFDIR))
+        err_exit(EX_USAGE, "%s is not a directory", optarg);
+      data_dir.push_back(optarg);
+      break;
+    }
+    case 2:
       autocomplete_length = get_long(optarg);
       break;
-    case 2:
+    case 3:
       autocomplete_limit = get_long(optarg);
       break;
     case 4:
@@ -1852,9 +1870,8 @@ int main(int argc, char *argv[])
       break;
     }
   }
-  if (optind+1 != argc)
+  if (data_dir.empty())
     print_help(stderr);
-  data_dir = argv[optind];
 
 #define D(name) printf("%s: %ld\n", #name, name)
 

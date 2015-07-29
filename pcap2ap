@@ -9,12 +9,17 @@ ap_suffix=.ap
 
 usage() {
   cat <<e
-Usage: ${program##*/} dir
+Usage: ${program##*/} dir...
 Transform .cap files into .ap files
 
 Options:
   -p max-procs   Run up to max-procs dshell-decode at a time (currently by detecting python2 processes, inaccurate)
 e
+  exit $1
+}
+
+fatal() {
+  echo ${@:2}
   exit $1
 }
 
@@ -39,20 +44,20 @@ semaphore() {
 }
 
 add_data() {
-  filename=$1
-  log_status found $filename
+  local filepath=$1
+  log_status found $filepath
   (
     read -p
     start=$(date +%s.%N)
-    $dshell_defcon/dshell-decode -d stream2dump --stream2dump_outfiles=$filename$ap_suffix $filename >/dev/null
+    $dshell_defcon/dshell-decode -d stream2dump --stream2dump_outfiles=$filepath$ap_suffix $filepath >/dev/null
     stop=$(date +%s.%N)
-    log_action created $ap_suffix for $filename, size: $(stat -c %s $filename), used $(bc -l<<<"scale=3;($stop-$start)/1") s
+    log_action created $ap_suffix for $filepath, size: $(stat -c %s $filepath), used $(bc -l<<<"scale=3;($stop-$start)/1") s
     print -p
   ) &
 }
 
 rm_data() {
-  rm -fv $filename$ap_suffix
+  rm -fv $filepath$ap_suffix
 }
 
 parallel=$(nproc)
@@ -64,54 +69,60 @@ while getopts h opt; do
   esac
 done
 
-dir=${1:-}
-if [[ -z $dir ]]; then
+if [[ -z ${1:-} ]]; then
   usage 1
 fi
-cd $dir
+for i in $@; do
+  [[ -d $i ]] || fatal 1 is not a directory
+done
 
 coproc semaphore
 
-log_status processing $dir
+main() {
+  log_status processing $@
 
-for i in *$pcap_suffix; do
-  [[ -e $i$ap_suffix && ! -z $i$ap_suffix ]] || add_data $i
-done
+  for i in *$pcap_suffix; do
+    [[ -e $i$ap_suffix && ! -z $i$ap_suffix ]] || add_data $i
+  done
 
-log_status start inotify
+  log_status start inotify
 
-inotifywait -mqe CREATE,CLOSE_WRITE,DELETE,MODIFY,MOVE --format $'%e\t%f' . | while IFS=$'\t' read -r event filename; do
-  [[ $filename =~ "\\$pcap_suffix\$" ]] || continue
-  if [[ $event =~ CREATE ]]; then
-    log_event CREATE $filename
-    if filetype=$(stat -c %F $filename); then
-      if [[ $filetype =~ symbolic ]]; then
-        add_data $filename
+  inotifywait -mqe CREATE,CLOSE_WRITE,DELETE,MODIFY,MOVE --format $'%e\t%w\t%f' $@ | while IFS=$'\t' read -r event dir filename; do
+    [[ $filename =~ "\\$pcap_suffix\$" ]] || continue
+    local filepath=$dir/$filename
+    if [[ $event =~ CREATE ]]; then
+      log_event CREATE $filepath
+      if filetype=$(stat -c %F $filepath); then
+        if [[ $filetype =~ symbolic ]]; then
+          add_data $filepath
+        else
+          add $filepath
+        fi
+      fi
+    elif [[ $event =~ DELETE ]]; then
+      log_event DELETE $filepath
+      del $filepath
+      rm_data $filepath
+    elif [[ $event =~ MOVED_FROM ]]; then
+      log_event MOVED_FROM $filepath
+      del $filepath
+      rm_data $filepath
+    elif [[ $event =~ MOVED_TO ]]; then
+      log_event MOVED_TO $filepath
+      add_data $filepath
+    elif [[ $event =~ MODIFY ]]; then
+      log_event MODIFY $filepath
+      add $filepath
+    elif [[ $event =~ CLOSE_WRITE ]]; then
+      if [[ -n ${modified[$filepath]} ]]; then
+        log_event CLOSE_WRITE after MODIFY $filepath
+        del $filepath
+        add_data $filepath
       else
-        add $filename
+        log_event CLOSE_WRITE $filepath
       fi
     fi
-  elif [[ $event =~ DELETE ]]; then
-    log_event DELETE $filename
-    del $filename
-    rm_data $filename
-  elif [[ $event =~ MOVED_FROM ]]; then
-    log_event MOVED_FROM $filename
-    del $filename
-    rm_data $filename
-  elif [[ $event =~ MOVED_TO ]]; then
-    log_event MOVED_TO $filename
-    add_data $filename
-  elif [[ $event =~ MODIFY ]]; then
-    log_event MODIFY $filename
-    add $filename
-  elif [[ $event =~ CLOSE_WRITE ]]; then
-    if [[ -n ${modified[$filename]} ]]; then
-      log_event CLOSE_WRITE after MODIFY $filename
-      del $filename
-      add_data $filename
-    else
-      log_event CLOSE_WRITE $filename
-    fi
-  fi
-done
+  done
+}
+
+main $@
