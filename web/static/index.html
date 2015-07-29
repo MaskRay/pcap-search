@@ -137,8 +137,6 @@
             <h1 class="header">pcap Search
             <small if={loading}> Loading</small></h1>
             <h5 class="ui transparent icon input">
-              <input id="input_port" type="text" placeholder="Search Port" onchange={change_port}>
-              <i class="search icon"></i>
               <select id='select_service' class="ui fluid dropdown">
                 <option each={i in services} value={i} selected={i == 'all'}>{i}</option>
               </select>
@@ -206,10 +204,10 @@
             </div>
             <div class="ui secondary segment">
               <div class="ui divided list">
-                <div class="item" each={packs} if={test_port(this)}>
+                <div class="item" each={packs}>
                   <div class="right floated content">
                     <a class="ui button" href={download(file, offset, 'pcap')} target="_blank">PCAP</a>
-                    <div class="ui button" onclick={open}>View</div>
+                    <div class="ui button" onclick={open.bind(this, parent) }>View</div>
                   </div>
                   <div class="middle aligned content">
                     <span class="line-number">{offset}</span><span class="ui label">Sever:{port0}</span><span class="ui label">Client:{port1}</span> <span class="ui label">{epoch}</span>
@@ -221,7 +219,6 @@
               </div>
             </div>
           </div>
-
         </div>
         <div class={hidden: !loading}>
           <h4>Loading ..</h4>
@@ -234,12 +231,19 @@
         this.pages = {}
         this.loading = false
         $.getJSON('/api/list', {}, function(response){
-          this.services = response
+          this.update({services:response})
+          var dropdown = $('.ui.dropdown').dropdown({
+            onChange: function(value, text){
+              if(value != this.service){
+                this.search(this.keyword)
+              }
+            }.bind(this)
+          })
+          dropdown.dropdown('set selected', response.indexOf('all')>=0 ? 'all' : response[0])
         }.bind(this))
-        $('.ui.dropdown').dropdown();
         $('.ui.search').search({
           cache: false,
-          maxResults: 100, // huge number
+          maxResults: 20, // huge number
           apiSettings: {
             url:"/api/autocomplete?q={query}&service={service}",
             onResponse:function(response){
@@ -277,7 +281,7 @@
         }.bind(this))
       }.bind(this))
       download(file, offset, type){
-        return "/download?filename="+ encodeURIComponent(file) + "&type=" + encodeURIComponent(type) + (offset == undefined?"":"&offset=" + encodeURIComponent(offset));
+        return "/download?filename="+ encodeURIComponent(file) + "&type=" + encodeURIComponent(type) + (offset == undefined?"":"&offset=" + encodeURIComponent(offset)) + "&service="+encodeURIComponent(this.service);
       }
       small(){
         $('body').removeClass('none')
@@ -290,29 +294,11 @@
         el.select()
         document.execCommand('Copy')
       }
-      fetch(e){
-        console.log(e)
-      }
-      change_port(e){
-        this.port = this.input_port.value
-        console.log(this.port)
-        if(this.port){
-
-        }
-
-      }
-      test_port(context){
-        // console.log(arguments)
-        if(this.port){
-          return this.port == context.port0 || this.port == context.port1;
-        }else{
-          return true;
-        }
-      }
       open(context, e){
+        console.log(this, arguments)
         console.log(e.item)
-        var file = context.parent.file,
-            offset = context.offset;
+        var file = context.file,
+            offset = e.item.offset;
         // clean the original data
         this.hex = '';
         this.repr = '';
@@ -344,11 +330,6 @@
           this.python = response.split("--------------------------------------------\n")
           this.update()
         }.bind(this), 'text')
-      }.bind(this)
-      show_complete(e){
-        var input_text = e.target.value;
-        console.log(input_text);
-        return true;
       }
       submit(e){
         if(e.which == 13){
@@ -356,8 +337,8 @@
           //hide the auto complete
           this.search(keyword)
           setTimeout(function(){
-            $('.ui.search').search('hide results')
-            $('#input_port').focus()
+            // $('.ui.search').search('hide results')
+            $('.resultBox').focus()
           }, 10)
 
         }else{
@@ -368,7 +349,6 @@
         var keyword = e.target.parentNode.children[0].value;
         // console.log(keyword)
         this.search(keyword)
-        return true
       }
       search(keyword, page){
         // console.log(this.keyword, keyword)
@@ -377,7 +357,7 @@
           this.page = 0
         }
         var page = page == undefined ? 0 : page;
-        var service=$('#select_service').val()
+        var service=this.select_service.value;
         $.get('/api/search', {page: page, q:keyword, service:service},function(response){
           // console.log(response.results);
           this.pages[page] = response.results
