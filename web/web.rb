@@ -22,7 +22,7 @@ SEARCH_TIMEOUT = 30
 MAX_PAGES = 30
 PER_PAGE = 20
 DSHELL_DEFCON = File.join __dir__, '..', 'dshell-defcon'
-PCAP_DIR = File.expand_path '/tmp/g'
+PCAP_DIR = File.expand_path '/home/ray/defcon22'
 
 # Main
 
@@ -37,6 +37,10 @@ set :bind, '0'
 set :port, 4568
 
 set :views, sass: 'css', coffee: 'js', :default => 'html'
+
+def offset2stream filepath, offset, type, out, &block
+  IO.popen([File.join(DSHELL_DEFCON, 'offset2stream.py'), "#{filepath}.ap", offset.to_s, type, filepath, out], &block)
+end
 
 helpers do
   def find_template(views, name, engine, &block)
@@ -59,6 +63,7 @@ get '/download' do
   filename = query['filename']
   offset = query['offset']
   type = query['type']
+  service = query['service'] || 'all'
   unless filename && type
     return 412
   end
@@ -66,7 +71,7 @@ get '/download' do
   when 'all'
     content_type 'application/vnd.tcpdump.pcap'
     attachment filename
-    send_file File.join(PCAP_DIR, filename)
+    send_file File.join(PCAP_DIR, service, filename)
   when 'pcap', 'str', 'hex', 'repr', 'python'
     return 412 unless offset
     if type == 'pcap'
@@ -74,7 +79,7 @@ get '/download' do
       attachment "#{filename.sub(/\.cap$/, '')}@#{offset}.cap"
     end
     temp_file = Tempfile.new filename
-    offset2stream filename, offset, type, temp_file.path do |h|
+    offset2stream File.join(PCAP_DIR, service, filename), offset, type, temp_file.path do |h|
       h.read
     end
     Thread.new do
@@ -87,10 +92,6 @@ get '/download' do
   else
     412
   end
-end
-
-def offset2stream filepath, offset, type, out, &block
-  IO.popen([File.join(DSHELL_DEFCON, 'offset2stream.py'), "#{filepath}.ap", offset.to_s, type, filepath, out], &block)
 end
 
 get '/api/list' do
