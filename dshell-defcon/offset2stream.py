@@ -87,12 +87,31 @@ def out_begin_python(*args):
     print >>_out_file, 'import zio'
     print >>_out_file, 'import sys'
     print >>_out_file, 'timeout = 0.5'
+    print >>_out_file, """
+try:
+    from termcolor import colored
+except:
+    # if termcolor import failed, use the following v1.1.0 source code of termcolor here
+    # since termcolor use MIT license, SATA license above should be OK
+    ATTRIBUTES = dict( list(zip([ 'bold', 'dark', '', 'underline', 'blink', '', 'reverse', 'concealed' ], list(range(1, 9)))))
+    del ATTRIBUTES['']
+    HIGHLIGHTS = dict( list(zip([ 'on_grey', 'on_red', 'on_green', 'on_yellow', 'on_blue', 'on_magenta', 'on_cyan', 'on_white' ], list(range(40, 48)))))
+    COLORS = dict(list(zip(['grey', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white', ], list(range(30, 38)))))
+    RESET = '\033[0m'
+
+    def colored(text, color=None, on_color=None, attrs=None):
+        fmt_str = '\033[%dm%s'
+        if color is not None: text = fmt_str % (COLORS[color], text)
+        if on_color is not None: text = fmt_str % (HIGHLIGHTS[on_color], text)
+        if attrs is not None:
+            for attr in attrs:
+                text = fmt_str % (ATTRIBUTES[attr], text)
+
+        text += RESET
+        return text
+"""
     print >>_out_file, 'print "Usage: %s <host> <port> [id]\\n\\ti: interact at end\\n\\td: diff response and expected response" % (sys.argv[0])'
     print >>_out_file, 'def diffstr(content, expected):'
-    print >>_out_file, '    try:'
-    print >>_out_file, '        from termcolor import colored'
-    print >>_out_file, '    except:'
-    print >>_out_file, '        return'
     print >>_out_file, '    if len(sys.argv) >= 4 and "d" in sys.argv[3]:'
     print >>_out_file, '        import difflib'
     print >>_out_file, '        differ = difflib.ndiff(expected, content)'
