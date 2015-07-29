@@ -89,8 +89,13 @@ get '/download' do
   end
 end
 
-def offset2stream filename, offset, type, out, &block
-  IO.popen([File.join(DSHELL_DEFCON, 'offset2stream.py'), File.join(PCAP_DIR, "#{filename}.ap"), offset.to_s, type, File.join(PCAP_DIR, filename), out], &block)
+def offset2stream filepath, offset, type, out, &block
+  IO.popen([File.join(DSHELL_DEFCON, 'offset2stream.py'), "#{filepath}.ap", offset.to_s, type, filepath, out], &block)
+end
+
+get '/api/list' do
+  content_type :json
+  Dir.entries(PCAP_DIR).select {|x| x !~ /^\./ && File.directory?(File.join PCAP_DIR, x) }.to_json
 end
 
 get '/api/autocomplete' do
@@ -102,14 +107,14 @@ get '/api/autocomplete' do
     Timeout.timeout SEARCH_TIMEOUT do
       sock = Socket.new Socket::AF_UNIX, Socket::SOCK_STREAM, 0
       sock.connect Socket.pack_sockaddr_un(SEARCH_SOCK)
-      sock.write "\0\0\0#{q}"
+      sock.write "\0#{File.join PCAP_DIR, 'all'}\0#{File.join PCAP_DIR, 'all'}\0#{q}"
       sock.close_write
       sug = []
       sock.read.lines.each {|line|
-        filename, offset, context = line.chomp.split "\t"
-        filename = filename.sub(/\.ap$/, '')
+        filepath, offset, context = line.chomp.split "\t"
+        filepath = filepath.sub(/\.ap$/, '')
         offset = offset.to_i
-        offset2stream filename, offset, 'loc', '/dev/stdout' do |h|
+        offset2stream filepath, offset, 'loc', '/dev/stdout' do |h|
           _, y = h.read.split.map(&:to_i)
           sug << context.scan(/(?:\\x(?:..)|[^\\]){,#{[y-offset,context.size].min}}/)[0] if offset < y
         end
@@ -127,6 +132,7 @@ end
 get '/api/search' do
   query = Rack::Utils.parse_query request.query_string
   q = query['q'] || ''
+  service = query['service'] || 'all'
   page = (query['page'] || 0).to_i
   offset = page*PER_PAGE
   res = ''
@@ -148,7 +154,7 @@ get '/api/search' do
     Timeout.timeout SEARCH_TIMEOUT do
       sock = Socket.new Socket::AF_UNIX, Socket::SOCK_STREAM, 0
       sock.connect Socket.pack_sockaddr_un(SEARCH_SOCK)
-      sock.write "#{offset}\0\0\0#{qq}"
+      sock.write "#{offset}\0#{File.join PCAP_DIR, service, "\x01"}\0#{File.join PCAP_DIR, service, "\x7f"}\0#{qq}"
       sock.close_write
       lines = sock.read.lines
       sock.close
@@ -157,14 +163,14 @@ get '/api/search' do
       res = []
       IO.popen [File.join(DSHELL_DEFCON, 'context.py')], 'r+' do |h|
         lines[0...-1].each {|line|
-          filename, offset, len = line.chomp.split "\t"
-          h.puts "#{File.join(PCAP_DIR, filename)}\t#{offset}\t#{len}"
+          filepath, offset, len = line.chomp.split "\t"
+          h.puts "#{filepath}\t#{offset}\t#{len}"
           h.flush
           line = h.readline
           _, offset, epoch, port0, port1, context = line.chomp.split "\t"
           epoch = epoch.to_i
           if epoch >= 0 && context && ! context.empty?
-            res << {filename: filename.sub(/\.ap$/, ''), offset: offset.to_i, epoch: epoch, port0: port0.to_i, port1: port1.to_i, context: context}
+            res << {filename: filepath.sub(/.*\/(.*)\.ap$/, '\1'), offset: offset.to_i, epoch: epoch, port0: port0.to_i, port1: port1.to_i, context: context}
           end
         }
       end
