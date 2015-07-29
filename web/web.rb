@@ -22,7 +22,7 @@ SEARCH_TIMEOUT = 30
 MAX_PAGES = 30
 PER_PAGE = 20
 DSHELL_DEFCON = File.join __dir__, '..', 'dshell-defcon'
-PCAP_DIR = File.expand_path '/tmp/n'
+PCAP_DIR = File.expand_path '/tmp/g'
 
 # Main
 
@@ -102,12 +102,13 @@ get '/api/autocomplete' do
   content_type :json
   query = Rack::Utils.parse_query request.query_string
   q = query['q'] || ''
+  service = query['service'] || 'all'
   res = ''
   begin
     Timeout.timeout SEARCH_TIMEOUT do
       sock = Socket.new Socket::AF_UNIX, Socket::SOCK_STREAM, 0
       sock.connect Socket.pack_sockaddr_un(SEARCH_SOCK)
-      sock.write "\0#{File.join PCAP_DIR, 'all'}\0#{File.join PCAP_DIR, 'all'}\0#{q}"
+      sock.write "\0#{File.join PCAP_DIR, service, "\x01"}\0#{File.join PCAP_DIR, service, "\x7f"}\0#{q}"
       sock.close_write
       sug = []
       sock.read.lines.each {|line|

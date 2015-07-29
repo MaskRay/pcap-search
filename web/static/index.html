@@ -139,6 +139,9 @@
             <h5 class="ui transparent icon input">
               <input id="input_port" type="text" placeholder="Search Port" onchange={change_port}>
               <i class="search icon"></i>
+              <select id='select_service' class="ui fluid dropdown">
+                <option each={i in services} value={i} selected={i == 'all'}>{i}</option>
+              </select>
             </h5>
             <div class="ui search">
               <div class="ui icon fluid input">
@@ -229,6 +232,9 @@
         // init the search
         this.pages = {}
         this.loading = false
+        $.getJSON('/api/list', {}, function(response){
+          this.services = response
+        }.bind(this))
         $('.ui.search').search({
           cache: false,
           maxResults: 100, // huge number
@@ -364,7 +370,8 @@
           this.page = 0
         }
         var page = page == undefined ? 0 : page;
-        $.get('/api/search', {page: page, q:keyword},function(response){
+        var service=$('#select_service').val()
+        $.get('/api/search', {page: page, q:keyword, service:service},function(response){
           // console.log(response.results);
           this.pages[page] = response.results
           for(var key in this.pages[page]){
