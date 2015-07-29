@@ -230,25 +230,32 @@
       <textarea class="hidden"></textarea>
       this.on('mount', function(){
         // init the search
+        var self = this
         this.pages = {}
         this.loading = false
         $.getJSON('/api/list', {}, function(response){
           this.services = response
         }.bind(this))
+        $('.ui.dropdown').dropdown();
         $('.ui.search').search({
           cache: false,
           maxResults: 100, // huge number
           apiSettings: {
-            url:"/api/autocomplete?q={query}",
+            url:"/api/autocomplete?q={query}&service={service}",
             onResponse:function(response){
               var ret = {
                 results: response.suggestions.map(function(x){
                   return {title: x}
                 })
               }
-              // console.log(ret)
               return ret
-            }
+            },
+            beforeSend:function(settings){
+              settings.urlData['service'] = self.select_service.value;
+              console.log(settings)
+              return settings
+            }.bind(this)
+
           },
           onSelect: function(e){
             this.search(e.title)
