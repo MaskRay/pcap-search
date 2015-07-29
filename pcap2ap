@@ -80,7 +80,7 @@ done
 
 log_status start inotify
 
-inotifywait -mqe CREATE,CLOSE_WRITE,DELETE,MODIFY,MOVE --format $'%e\t%f' /tmp/n | while IFS=$'\t' read -r event filename; do
+inotifywait -mqe CREATE,CLOSE_WRITE,DELETE,MODIFY,MOVE --format $'%e\t%f' . | while IFS=$'\t' read -r event filename; do
   [[ $filename =~ "\\$pcap_suffix\$" ]] || continue
   if [[ $event =~ CREATE ]]; then
     log_event CREATE $filename
