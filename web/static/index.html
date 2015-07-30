@@ -161,7 +161,8 @@
               <a class="active item" data-tab="hex">Hex</a>
               <a class="item" data-tab="repr">repr</a>
               <a class="item" data-tab="str">String</a>
-              <a class="item" data-tab="python">Python</a>
+              <a class="item" data-tab="python-simple">Python Simple</a>
+              <a class="item" data-tab="python-diff">Python Diff</a>
             </div>
             <div class="ui bottom attached active tab segment" data-tab="hex">
               <code class="hex">
@@ -178,9 +179,14 @@
                 <div each={i,j in str}>{i}</div>
               </code>
             </div>
-            <div class="ui bottom attached tab segment" data-tab="python">
+            <div class="ui bottom attached tab segment" data-tab="python-simple">
               <code class="python">
                   <div>{python}</div>
+              </code>
+            </div>
+            <div class="ui bottom attached tab segment" data-tab="python-diff">
+              <code class="python">
+                  <div>{python_diff}</div>
               </code>
             </div>
           </div>
@@ -308,6 +314,7 @@
         this.repr = '';
         this.str = '';
         this.python = '';
+        this.python_diff = ""
         // fetch the data
         this.loading = true
         this.update() // animate
@@ -330,8 +337,12 @@
           this.str = response.split("--------------------------------------------\n")
           this.update()
         }.bind(this), 'text')
-        $.get(this.download(file, offset, 'python'), {}, function(response){
-          this.python = response.split("--------------------------------------------\n")
+        $.get(this.download(file, offset, 'pythonsimple'), {}, function(response){
+          this.python = response
+          this.update()
+        }.bind(this), 'text')
+        $.get(this.download(file, offset, 'pythondiff'), {}, function(response){
+          this.python_diff = response
           this.update()
         }.bind(this), 'text')
       }
