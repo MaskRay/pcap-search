@@ -137,6 +137,8 @@
             <h1 class="header">pcap Search
             <small if={loading}> Loading</small></h1>
             <h5 class="ui transparent icon input">
+              <input id="input_port" type="text" placeholder="Search Port" onchange={change_port}>
+              <i class="search icon"></i>
               <select id='select_service' class="ui fluid dropdown">
                 <option each={i in services} value={i} selected={i == 'all'}>{i}</option>
               </select>
@@ -204,7 +206,7 @@
             </div>
             <div class="ui secondary segment">
               <div class="ui divided list">
-                <div class="item" each={packs}>
+                <div class="item" each={packs} if={test_port(this)}>
                   <div class="right floated content">
                     <a class="ui button" href={download(file, offset, 'pcap')} target="_blank">PCAP</a>
                     <div class="ui button" onclick={open.bind(this, parent) }>View</div>
@@ -402,6 +404,22 @@
           }
         }
         return indices
+      }
+      change_port(e){
+        var new_port = parseInt(this.input_port.value)
+        if(new_port >= 0 && new_port <= 65535){
+          this.port = new_port
+        }else{
+          e.preventUpdate = true;
+        }
+      }
+      test_port(context){
+        console.log(context)
+        if(this.port){
+          return context.port1 == this.port || context.port0 == this.port
+        }else{
+          return true
+        }
       }
     </search_bar>
   </script>
