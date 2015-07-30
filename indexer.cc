@@ -1435,10 +1435,10 @@ protected:
             struct stat statbuf;
             log_event("CREATE %s\n", path.c_str());
             if (lstat(path.c_str(), &statbuf) < 0) continue;
-            if (S_IFLNK & statbuf.st_mode) {
+            if (S_ISLNK(statbuf.st_mode)) {
               modified_.erase(path);
               add_data(path);
-            } else if (S_IFREG & statbuf.st_mode)
+            } else if (S_ISREG(statbuf.st_mode))
               modified_.insert(path);
           } else if (ev->mask & IN_DELETE) {
             log_event("DELETE %s\n", path.c_str());
@@ -1821,7 +1821,7 @@ int main(int argc, char *argv[])
       struct stat statbuf;
       if (stat(optarg, &statbuf) < 0)
         err_exit(EX_OSFILE, "stat");
-      if (! (statbuf.st_mode & S_IFDIR))
+      if (! S_ISDIR(statbuf.st_mode))
         err_exit(EX_USAGE, "%s is not a directory", optarg);
       data_dir.push_back(optarg);
       break;
