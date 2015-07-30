@@ -242,6 +242,7 @@
             }.bind(this)
           })
           dropdown.dropdown('set selected', response.indexOf('all')>=0 ? 'all' : response[0])
+          this.service = response.indexOf('all')>=0 ? 'all' : response[0]
         }.bind(this))
         $('.ui.search').search({
           cache: false,
