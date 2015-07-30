@@ -80,7 +80,7 @@ def out_str(srcip, srcport, destip, dstport, data, direction, ff):
 
 
 
-def out_begin_python2(*args):
+def out_begin_pythonsimple(*args):
     global _out_file
     _out_file = open(sys.argv[5], 'wb')
     print >>_out_file, '#!/usr/bin/env python2'
@@ -113,13 +113,13 @@ except:
     print >>_out_file, 'idx = 0'
 
 
-def out_end_python2():
+def out_end_pythonsimple():
     print >>_out_file, "colors = ['cyan', 'yellow']"
     print >>_out_file, 'for s, o in seq: print colored(repr(peers[s][o]), colors[s])'
     if _out_file != sys.stdout:
         _out_file.close()
 
-def out_python2(srcip, srcport, destip, dstport, data, direction, ff):
+def out_pythonsimple(srcip, srcport, destip, dstport, data, direction, ff):
     _idir = {'sc': 0, 'cs': 1}
     idir = _idir[direction]
     print >>_out_file, "idx += 1"
@@ -128,7 +128,7 @@ def out_python2(srcip, srcport, destip, dstport, data, direction, ff):
 
 
 
-def out_begin_python(*args):
+def out_begin_pythondiff(*args):
     global _out_file
     _out_file = open(sys.argv[5], 'wb')
     print >>_out_file, '#!/usr/bin/env python2'
@@ -178,13 +178,13 @@ except:
     print >>_out_file, '__content = ""'
 
 
-def out_end_python():
+def out_end_pythondiff():
     print >>_out_file, 'if len(sys.argv) >= 4 and "i" in sys.argv[3]:'
     print >>_out_file, '    z.interact()'
     if _out_file != sys.stdout:
         _out_file.close()
 
-def out_python(srcip, srcport, destip, dstport, data, direction, ff):
+def out_pythondiff(srcip, srcport, destip, dstport, data, direction, ff):
     if direction == 'cs':
         print >>_out_file, "z.write(%s)" % (repr(data))
     else:
