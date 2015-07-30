@@ -237,6 +237,7 @@
           var dropdown = $('.ui.dropdown').dropdown({
             onChange: function(value, text){
               if(value != this.service){
+                this.service = value;
                 this.search(this.keyword)
               }
             }.bind(this)
