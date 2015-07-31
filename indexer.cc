@@ -76,7 +76,8 @@ long fmindex_sample_rate = 32;
 long rrr_sample_rate = 8;
 long request_timeout_milli = 1000;
 long request_count = -1;
-bool do_inotify = true;
+bool opt_inotify = true;
+bool opt_recursive = false;
 atomic<int> ongoing_requests(0);
 
 ///// log
@@ -194,6 +195,7 @@ void err_msg(const char *format, ...)
   errno = saved;
   va_end(ap);
 }
+#define err_msg_g(...) ({err_msg(__VA_ARGS__); goto quit;})
 
 void err_exit(int exitno, const char *format, ...)
 {
@@ -1329,6 +1331,7 @@ void print_help(FILE *fh)
         "\n"
         "  others:\n"
         "  -i, --index               index mode. (default: server mode)\n"
+        "  -r, --recursive           recursive\n"
         "  -s, --data-suffix         data file suffix. (default: .ap)\n"
         "  -S, --index-suffix        index file suffix. (default: .fm)\n"
         "  -h, --help                display this help and exit\n"
@@ -1371,9 +1374,10 @@ bool is_index(const string &path)
 class Processor
 {
 protected:
-  int inotify_fd;
+  int inotify_fd_;
   set<string> modified_;
-  map<int, const char *> wd2dir_;
+  map<int, string> wd2dir_;
+  map<string, int> dir2wd_;
 
   virtual bool is_index_mode() const = 0;
 
@@ -1393,72 +1397,120 @@ protected:
     return open(path.c_str(), flags, mode);
   }
 
-  void process_dir() {
-    if (do_inotify) {
-      if ((inotify_fd = inotify_init()) < 0)
-        err_exit(EX_USAGE, "inotify_init");
-      for (auto dir: data_dir) {
-        int wd = inotify_add_watch(inotify_fd, dir, IN_CLOSE_WRITE | IN_CREATE | IN_DELETE | IN_MODIFY | IN_MOVE);
-        if (wd < 0)
-          err_exit(EX_USAGE, "inotify_add_watch");
-        wd2dir_[wd] = dir;
-      }
-    }
-    for (auto dir: data_dir) {
-      DIR *dirp = opendir(dir);
+  void process_aux(int depth, int dir_fd, const char *path, const char *file) {
+    int fd = -1;
+    struct stat statbuf;
+    if (stat(path, &statbuf) < 0)
+      err_msg_g("stat");
+
+    if (S_ISREG(statbuf.st_mode)) {
+      if (is_data(path))
+        add_data(path);
+    } else if (S_ISDIR(statbuf.st_mode)) {
+      if (! opt_recursive && depth > 0) goto quit;
+
+      inotify_add_dir(path);
+
+      fd = openat(dir_fd < 0 ? AT_FDCWD : dir_fd, file, O_RDONLY);
+      if (fd < 0)
+        err_msg_g("failed to open `%s'", path);
+      DIR *dirp = fdopendir(fd);
       if (! dirp)
-        err_exit(EX_OSERR, "opendir");
-      struct dirent dirent, *res;
-      while (readdir_r(dirp, &dirent, &res) == 0 && res) {
-        string path = to_path(dir, dirent.d_name);
-        if (is_data(path))
-          add_data(path);
-      }
+        err_msg_g("opendir");
+      struct dirent dirent, *dirt;
+      while (! readdir_r(dirp, &dirent, &dirt) && dirt)
+        if (strcmp(dirent.d_name, ".") && strcmp(dirent.d_name, "..")) {
+          char *sub_path;
+          if (asprintf(&sub_path, "%s/%s", path, dirent.d_name) < 0)
+            err_exit(EX_OSERR, "asprintf");
+          process_aux(depth+1, fd, sub_path, dirent.d_name);
+          free(sub_path);
+        }
       closedir(dirp);
+      fd = -1;
     }
+
+quit:;
+     if (fd >= 0)
+       close(fd);
+  }
+
+  int inotify_add_dir(const char *dir) {
+    int wd = inotify_add_watch(inotify_fd_, dir, IN_CLOSE_WRITE | IN_CREATE | IN_DELETE | IN_IGNORED | IN_MODIFY | IN_MOVE | IN_MOVE_SELF);
+    if (wd < 0) {
+      err_msg("failed to inotify_add_watch `%s'", dir);
+      return wd;
+    }
+    wd2dir_[wd] = dir;
+    dir2wd_[dir] = wd;
+    log_action("inotify_add_watch `%s'\n", dir);
+    return wd;
+  }
+
+  void process() {
+    if (opt_inotify)
+      if ((inotify_fd_ = inotify_init()) < 0)
+        err_exit(EX_OSERR, "inotify_init");
+    for (auto dir: data_dir)
+      process_aux(0, -1, dir, dir);
   }
 
   void process_inotify() {
     char buf[sizeof(inotify_event)+NAME_MAX+1];
     int nread;
-    if ((nread = read(inotify_fd, buf, sizeof buf)) <= 0)
+    if ((nread = read(inotify_fd_, buf, sizeof buf)) <= 0)
       err_exit(EX_OSERR, "failed to read inotify fd");
+    errno = 0;
     for (auto *ev = (inotify_event *)buf; (char *)ev < (char *)buf+nread;
          ev = (inotify_event *)((char *)ev + sizeof(inotify_event) + ev->len))
-      if (ev->len > 0) {
-        const char *dir = wd2dir_[ev->wd];
-        if (is_index_mode() ? is_data(ev->name) : is_index(ev->name)) {
-          string path = to_path(dir, ev->name);
-          if (! is_index_mode())
-            path = path.substr(0, path.size()-index_suffix.size()); // to data file path
-          if (ev->mask & IN_CREATE) {
-            struct stat statbuf;
+      if (ev->len > 0 || ev->mask & (IN_IGNORED | IN_MOVE_SELF)) {
+        const char *dir = wd2dir_[ev->wd].c_str();
+        bool watched = is_index_mode() ? is_data(ev->name) : is_index(ev->name);
+        string path = to_path(dir, ev->name);
+        if (is_index(ev->name) && ! is_index_mode())
+          path = path.substr(0, path.size()-index_suffix.size()); // to data file path
+        if (ev->mask & (IN_CREATE | IN_MOVED_TO)) {
+          if (ev->mask & IN_CREATE)
             log_event("CREATE %s\n", path.c_str());
-            if (lstat(path.c_str(), &statbuf) < 0) continue;
-            if (S_ISLNK(statbuf.st_mode)) {
-              modified_.erase(path);
-              add_data(path);
-            } else if (S_ISREG(statbuf.st_mode))
-              modified_.insert(path);
-          } else if (ev->mask & IN_DELETE) {
-            log_event("DELETE %s\n", path.c_str());
-            modified_.erase(path);
-            rm_data(path);
-          } else if (ev->mask & IN_MOVED_FROM) {
-            log_event("MOVED_FROM %s\n", path.c_str());
-            modified_.erase(path);
-            rm_data(path);
-          } else if (ev->mask & IN_MOVED_TO) {
+          else
             log_event("MOVED_TO %s\n", path.c_str());
-            add_data(path);
-          } else if (ev->mask & IN_MODIFY)
-            modified_.insert(path);
-          else if (ev->mask & IN_CLOSE_WRITE) {
-            if (modified_.count(path)) {
+
+          if (ev->mask & IN_ISDIR)
+            opt_recursive && inotify_add_dir(path.c_str());
+          else if (watched) {
+            struct stat statbuf;
+            if (lstat(path.c_str(), &statbuf) < 0) continue;
+            if (ev->mask & IN_MOVED_TO || S_ISLNK(statbuf.st_mode)) {
               modified_.erase(path);
-              log_event("CLOSE_WRITE after MODIFY %s\n", path.c_str());
               add_data(path);
-            }
+            } else
+              modified_.insert(path);
+          }
+        } else if (ev->mask & (IN_DELETE | IN_MOVED_FROM)) {
+          if (ev->mask & IN_DELETE)
+            log_event("DELETE %s\n", path.c_str());
+          else
+            log_event("MOVED_FROM %s\n", path.c_str());
+          if (watched && ! (ev->mask & IN_ISDIR)) {
+            modified_.erase(path);
+            rm_data(path);
+          }
+        } else if (ev->mask & IN_IGNORED) {
+          log_event("IGNORED %s\n", dir);
+          if (wd2dir_.count(ev->wd)) {
+            dir2wd_.erase(wd2dir_[ev->wd]);
+            wd2dir_.erase(ev->wd);
+          }
+        } else if (ev->mask & IN_MODIFY) {
+          if (watched)
+            modified_.insert(path);
+        } else if (ev->mask & IN_MOVE_SELF)
+          err_exit(EX_OSFILE, "`%s' has been moved", wd2dir_[ev->wd].c_str());
+        else if (ev->mask & IN_CLOSE_WRITE) {
+          if (modified_.count(path)) {
+            log_event("CLOSE_WRITE after MODIFY %s\n", path.c_str());
+            modified_.erase(path);
+            add_data(path);
           }
         }
       }
@@ -1523,7 +1575,7 @@ protected:
         unlink(index_path.c_str());
         goto quit;
       }
-      log_action("created index for %s. data: %ld, index: %ld, used %.3lf s\n", data_path.c_str(), pcap_size, index_size, sw.elapsed());
+      log_action("created index of %s. data: %ld, index: %ld, used %.3lf s\n", data_path.c_str(), pcap_size, index_size, sw.elapsed());
     }
 quit:
     if (fh)
@@ -1548,14 +1600,14 @@ quit:
 
 public:
   void run() {
-    process_dir();
-    if (! do_inotify) return;
+    process();
+    if (! opt_inotify) return;
     log_status("start inotify\n");
     fd_set rfds;
     for(;;) {
       FD_ZERO(&rfds);
-      FD_SET(inotify_fd, &rfds);
-      int res = select(inotify_fd+1, &rfds, NULL, NULL, NULL);
+      FD_SET(inotify_fd_, &rfds);
+      int res = select(inotify_fd_+1, &rfds, NULL, NULL, NULL);
       if (res < 0) {
         if (errno == EINTR) continue;
         err_exit(EX_OSERR, "select");
@@ -1619,7 +1671,7 @@ protected:
       entry->fm = new FMIndex;
       ar & *entry->fm;
       path2entry_[data_path] = entry;
-      log_action("loaded index for %s\n", data_path.c_str());
+      log_action("loaded index of %s\n", data_path.c_str());
     }
     return;
 quit:
@@ -1638,7 +1690,7 @@ quit:
   void rm_data(const string &data_path) override {
     if (path2entry_.count(data_path)) {
       path2entry_.erase(data_path);
-      log_action("no serving %s\n", data_path.c_str());
+      log_action("unloaded index of %s\n", data_path.c_str());
     }
   }
 
@@ -1658,20 +1710,20 @@ public:
     if (listen(sockfd, 1) < 0)
       err_exit(EX_OSERR, "listen");
 
-    process_dir();
+    process();
     log_status("start inotify\n");
 
     while (request_count) {
       fd_set rfds;
       FD_ZERO(&rfds);
-      FD_SET(inotify_fd, &rfds);
+      FD_SET(inotify_fd_, &rfds);
       FD_SET(sockfd, &rfds);
-      int res = select(max(sockfd, inotify_fd)+1, &rfds, NULL, NULL, NULL);
+      int res = select(max(sockfd, inotify_fd_)+1, &rfds, NULL, NULL, NULL);
       if (res < 0) {
         if (errno == EINTR) continue;
         err_exit(EX_OSERR, "select");
       }
-      if (FD_ISSET(inotify_fd, &rfds))
+      if (FD_ISSET(inotify_fd_, &rfds))
         process_inotify();
       if (FD_ISSET(sockfd, &rfds)) {
         int clifd = accept(sockfd, NULL, NULL);
@@ -1691,7 +1743,7 @@ public:
         request_count && request_count--;
       }
     }
-    close(inotify_fd);
+    close(inotify_fd_);
     close(sockfd);
     while (ongoing_requests.load() > 0)
       sleep(1);
@@ -1796,7 +1848,7 @@ quit:
 int main(int argc, char *argv[])
 {
   bool is_index_mode = false;
-  bool do_inotify = true;
+  bool opt_inotify = true;
 
   int opt;
   static struct option long_options[] = {
@@ -1808,6 +1860,7 @@ int main(int argc, char *argv[])
     {"index",               no_argument,       0,   'i'},
     {"index-suffix",        required_argument, 0,   'S'},
     {"oneshot",             no_argument,       0,   'o'},
+    {"recursive",           no_argument,       0,   'r'},
     {"request-count",       required_argument, 0,   'c'},
     {"request-timeout",     required_argument, 0,   4},
     {"rrr-sample-rate",     required_argument, 0,   5},
@@ -1815,7 +1868,7 @@ int main(int argc, char *argv[])
     {0,                     0,                 0,   0},
   };
 
-  while ((opt = getopt_long(argc, argv, "-c:f:hil:or:p:s:S:", long_options, NULL)) != -1) {
+  while ((opt = getopt_long(argc, argv, "-c:f:hil:op:rs:S:", long_options, NULL)) != -1) {
     switch (opt) {
     case 1: {
       struct stat statbuf;
@@ -1854,10 +1907,13 @@ int main(int argc, char *argv[])
       search_limit = get_long(optarg);
       break;
     case 'o':
-      do_inotify = false;
+      opt_inotify = false;
       break;
     case 'p':
       listen_path = optarg;
+      break;
+    case 'r':
+      opt_recursive = true;
       break;
     case 's':
       data_suffix = optarg;
