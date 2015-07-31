@@ -85,7 +85,9 @@ def out_begin_pythonsimple(*args):
     _out_file = open(sys.argv[5], 'wb')
     print >>_out_file, '#!/usr/bin/env python2'
     print >>_out_file, '#-*- coding:utf-8 -*-'
-    print >>_out_file, """
+    print >>_out_file, r"""
+import os, sys, string, random
+from zio import *
 try:
     from termcolor import colored
 except:
@@ -108,23 +110,51 @@ except:
         text += RESET
         return text
 """
-    print >>_out_file, 'peers = [{}, {}]'
     print >>_out_file, 'seq = []'
-    print >>_out_file, 'idx = 0'
+    print >>_out_file, '# 1 for client, 0 for server'
 
 
 def out_end_pythonsimple():
     print >>_out_file, "colors = ['cyan', 'yellow']"
-    print >>_out_file, 'for s, o in seq: print colored(repr(peers[s][o]), colors[s])'
+    print >>_out_file, r"""
+def attack(host, port):
+    io = zio((host, port), print_read=COLORED(REPR, 'yellow'), print_write=COLORED(REPR, 'cyan'), timeout=20)
+    for c, s in seq:
+        if c == 0:
+            io.read_until_timeout(1)
+        else:
+            io.write(s)
+    # io.interact()
+    return io.read()
+
+if __name__ == '__main__':
+    if len(sys.argv) == 1:
+        print '-' * 50, ' BEGIN NETWORK FLOW ', '-' * 50
+        for c, s in seq: 
+            print c == 0 and '[ Server ]:' or '[ Client ]:', colored(repr(s), colors[c])
+        print '-' * 50, ' END NETWORK FLOW ', '-' * 50
+        print 'usage: \n    %s <host> <port>' % sys.argv[0]
+        sys.exit()
+    port = 143
+    host = '127.0.0.1'
+    if len(sys.argv) > 1:
+        host = sys.argv[1]
+    if len(sys.argv) > 2:
+        try:
+            port = int(sys.argv[2])
+        except:
+            port = 143
+    flags = attack(host, port)
+
+    print 'flags = %r' % (flags)
+"""
     if _out_file != sys.stdout:
         _out_file.close()
 
 def out_pythonsimple(srcip, srcport, destip, dstport, data, direction, ff):
     _idir = {'sc': 0, 'cs': 1}
     idir = _idir[direction]
-    print >>_out_file, "idx += 1"
-    print >>_out_file, "peers[%d][idx] = %s" % (idir, repr(data))
-    print >>_out_file, "seq.append((%d, idx))" % (idir)
+    print >>_out_file, "seq.append((%d, %r))" % (idir, data)
 
 
 
@@ -136,7 +166,7 @@ def out_begin_pythondiff(*args):
     print >>_out_file, 'import zio'
     print >>_out_file, 'import sys'
     print >>_out_file, 'timeout = 0.5'
-    print >>_out_file, """
+    print >>_out_file, r"""
 try:
     from termcolor import colored
 except:
