@@ -115,10 +115,10 @@ except:
 
 
 def out_end_pythonsimple():
-    print >>_out_file, "colors = ['cyan', 'yellow']"
+    print >>_out_file, "colors = ['yellow', 'cyan']"
     print >>_out_file, r"""
 def attack(host, port):
-    io = zio((host, port), print_read=COLORED(REPR, 'yellow'), print_write=COLORED(REPR, 'cyan'), timeout=20)
+    io = zio((host, port), print_read=COLORED(REPR, 'yellow'), print_write=COLORED(REPR, 'cyan'), timeout=40)
     for c, s in seq:
         if c == 0:
             io.read_until_timeout(1)
