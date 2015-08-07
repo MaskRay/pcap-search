@@ -161,8 +161,8 @@
               <a class="active item" data-tab="hex">Hex</a>
               <a class="item" data-tab="repr">repr</a>
               <a class="item" data-tab="str">String</a>
-              <a class="item" data-tab="python-simple">Python Simple</a>
-              <a class="item" data-tab="python-diff">Python Diff</a>
+              <a class="item" data-tab="python_simple">Python Simple</a>
+              <a class="item" data-tab="python_diff">Python Diff</a>
             </div>
             <div class="ui bottom attached active tab segment" data-tab="hex">
               <code class="hex">
@@ -179,12 +179,12 @@
                 <div each={i,j in str}>{i}</div>
               </code>
             </div>
-            <div class="ui bottom attached tab segment" data-tab="python-simple">
+            <div class="ui bottom attached tab segment" data-tab="python_simple">
               <code class="python">
-                  <div>{python}</div>
+                  <div>{python_simple}</div>
               </code>
             </div>
-            <div class="ui bottom attached tab segment" data-tab="python-diff">
+            <div class="ui bottom attached tab segment" data-tab="python_diff">
               <code class="python">
                   <div>{python_diff}</div>
               </code>
@@ -313,7 +313,7 @@
         this.hex = '';
         this.repr = '';
         this.str = '';
-        this.python = '';
+        this.python_simple = '';
         this.python_diff = ""
         // fetch the data
         this.loading = true
@@ -329,16 +329,12 @@
           this.repr = response.split("--------------------------------------------\n")
           this.update()
         }.bind(this), 'text')
-        $.get(this.download(file, offset, 'python'), {}, function(response){
-          this.python = response
-          this.update()
-        }.bind(this), 'text')
         $.get(this.download(file, offset, 'str'), {}, function(response){
           this.str = response.split("--------------------------------------------\n")
           this.update()
         }.bind(this), 'text')
         $.get(this.download(file, offset, 'pythonsimple'), {}, function(response){
-          this.python = response
+          this.python_simple = response
           this.update()
         }.bind(this), 'text')
         $.get(this.download(file, offset, 'pythondiff'), {}, function(response){

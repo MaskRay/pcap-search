@@ -22,7 +22,7 @@ SEARCH_TIMEOUT = 30
 MAX_PAGES = 30
 PER_PAGE = 20
 DSHELL_DEFCON = File.join __dir__, '..', 'dshell-defcon'
-PCAP_DIR = File.expand_path '/home/ray/defcon22'
+PCAP_DIR = File.expand_path '/home/ray/defcon23'
 
 # Main
 
