@@ -17,6 +17,16 @@ len_conns = list(struct.unpack('I' * total_conns, ff.read(4 * total_conns)))
 _out_file = sys.stdout
 _offset_in_data = False
 
+
+def out_begin_locconn(_a, _b, ff):
+    print ff.tell(),
+
+def out_locconn(*args):
+    pass
+
+def out_end_locconn(ff):
+    print ff.tell()
+
 def out_end_str(*args):
     if _out_file != sys.stdout:
         _out_file.close()
@@ -189,7 +199,7 @@ except:
         text += RESET
         return text
 """
-    print >>_out_file, 'print "Usage: %s <host> <port> [id]\\n\\ti: interact at end\\n\\td: diff response and expected response" % (sys.argv[0])'
+    print >>_out_file, 'print "Usage: %s <host> <port> [idr]\\n\\ti: interact at end\\n\\td: diff response and expected response" % (sys.argv[0])'
     print >>_out_file, 'def diffstr(content, expected):'
     print >>_out_file, '    if len(sys.argv) >= 4 and "d" in sys.argv[3]:'
     print >>_out_file, '        import difflib'
@@ -208,7 +218,9 @@ except:
     print >>_out_file, '__content = ""'
 
 
-def out_end_pythondiff():
+def out_end_pythondiff(*args):
+    print >>_out_file, 'if len(sys.argv) >= 4 and "r" in sys.argv[3]:'
+    print >>_out_file, '    z.read_until_timeout(1)'
     print >>_out_file, 'if len(sys.argv) >= 4 and "i" in sys.argv[3]:'
     print >>_out_file, '    z.interact()'
     if _out_file != sys.stdout:
@@ -223,7 +235,7 @@ def out_pythondiff(srcip, srcport, destip, dstport, data, direction, ff):
         print >>_out_file, "diffstr(__content, __expected)"
 
 
-def out_begin_pcap(_pkts, timestamp):
+def out_begin_pcap(_pkts, timestamp, *args):
     import dpkt
     import pcap
     pkts = list(_pkts)
@@ -260,7 +272,7 @@ for i in len_conns:
         len_pkt, cliip, servip, cliport, servport, timestamp = struct.unpack('IIIHHI', ff.read(20))
         cnt_pkt = struct.unpack('I', ff.read(4))[0]
         pkts_id = struct.unpack('I' * cnt_pkt, ff.read(4 * cnt_pkt))
-        out_begin(pkts_id, timestamp)
+        out_begin(pkts_id, timestamp, ff)
         for i in xrange(len_pkt):
             direction = ff.read(1)
             len_data = struct.unpack('I', ff.read(4))[0]
@@ -269,7 +281,7 @@ for i in len_conns:
                 out(cliip, cliport, servip, servport, data, 'cs', ff)
             else:
                 out(servip, servport, cliip, cliport, data, 'sc', ff)
-        out_end()
+        out_end(ff)
         break
     current_offset += i
 
