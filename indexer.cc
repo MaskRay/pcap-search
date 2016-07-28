@@ -7,6 +7,7 @@
 #include <cassert>
 #include <cctype>
 #include <climits>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <cstdio>
@@ -19,6 +20,7 @@
 #include <getopt.h>
 #include <map>
 #include <netinet/in.h>
+#include <poll.h>
 #include <pthread.h>
 #include <set>
 #include <setjmp.h>
@@ -63,9 +65,11 @@ typedef int32_t i32;
 
 const char MAGIC_BAD[] = "BAD ";
 const char MAGIC_GOOD[] = "GOOD";
+const long LOGAB = CHAR_BIT, AB = 1L << LOGAB;
 
 const size_t BUF_SIZE = 512;
 const char *listen_path = "/tmp/search.sock";
+const pthread_t main_thread = pthread_self();
 vector<const char *> data_dir;
 string data_suffix = ".ap";
 string index_suffix = ".fm";
@@ -74,28 +78,29 @@ long autocomplete_length = 20;
 long search_limit = 20;
 long fmindex_sample_rate = 32;
 long rrr_sample_rate = 8;
-long request_timeout_milli = 1000;
+double request_timeout = 1;
 long request_count = -1;
 bool opt_inotify = true;
 bool opt_recursive = false;
-atomic<int> ongoing_requests(0);
+atomic<int> ongoing(0);
 
 ///// log
+int log_pipe[2];
 
 void log_generic(const char *prefix, const char *format, va_list ap)
 {
+  int fd = main_thread == pthread_self() ? STDOUT_FILENO : log_pipe[1];
   char buf[BUF_SIZE];
   timeval tv;
   tm tm;
   gettimeofday(&tv, NULL);
-  fputs(prefix, stdout);
+  write(fd, prefix, strlen(prefix));
   if (localtime_r(&tv.tv_sec, &tm)) {
     strftime(buf, sizeof buf, "%T.%%06u ", &tm);
-    printf(buf, tv.tv_usec);
+    dprintf(fd, buf, tv.tv_usec);
   }
-  vprintf(format, ap);
-  fputs(SGR0, stdout);
-  fflush(stdout);
+  vdprintf(fd, format, ap);
+  write(fd, SGR0, strlen(SGR0));
 }
 
 void log_event(const char *format, ...)
@@ -221,30 +226,30 @@ void err_exit(int exitno, const char *format, ...)
 
 ///// common
 
-u32 clog2(u32 x)
+u64 clog2(u64 x)
 {
-  return x > 1 ? 32-__builtin_clz(x-1) : 0;
+  return x > 1 ? 64-__builtin_clzll(x-1) : 0;
 }
 
-u32 select_in_u16(u16 x, u32 k)
+u64 select_in_u16(u16 x, u64 k)
 {
   for (; k; k--)
     x &= x - 1;
-  return __builtin_ctz(x);
+  return __builtin_ctzll(x);
 }
 
-u32 select_in_u64(u64 x, i32 k)
+u64 select_in_u64(u64 x, u64 k)
 {
-  u32 c;
-  c =  __builtin_popcount(u16(x));
+  u64 c;
+  c =  __builtin_popcountll(u16(x));
   if (c > k) return select_in_u16(x, k) + 0;
   x >>= 16;
   k -= c;
-  c =  __builtin_popcount(u16(x));
+  c =  __builtin_popcountll(u16(x));
   if (c > k) return select_in_u16(x, k) + 16;
   x >>= 16;
   k -= c;
-  c =  __builtin_popcount(u16(x));
+  c =  __builtin_popcountll(u16(x));
   if (c > k) return select_in_u16(x, k) + 32;
   x >>= 16;
   k -= c;
@@ -260,6 +265,18 @@ long get_long(const char *arg)
     err_exit(EX_USAGE, "get_long: %s", arg);
   if (*end)
     err_exit(EX_USAGE, "get_long: nonnumeric character");
+  return ret;
+}
+
+double get_double(const char *arg)
+{
+  char *end;
+  errno = 0;
+  double ret = strtod(arg, &end);
+  if (errno)
+    err_exit(EX_USAGE, "get_double: %s", arg);
+  if (*end)
+    err_exit(EX_USAGE, "get_double: nonnumeric character");
   return ret;
 }
 
@@ -290,7 +307,7 @@ string unescape(size_t n, const char *str)
   for (size_t i = 0; i < n; ) {
     if (str[i] == '\\') {
       if (i+4 <= n && str[i+1] == 'x') {
-        ret += char(from_hex(str[i+2])*16+from_hex(str[i+3]));
+        ret.push_back(from_hex(str[i+2])*16+from_hex(str[i+3]));
         i += 4;
         continue;
       }
@@ -319,24 +336,12 @@ string unescape(size_t n, const char *str)
   return ret;
 }
 
-template<class Fwd>
-struct Reverser
-{
-  const Fwd &fwd_;
-  Reverser<Fwd>(const Fwd &fwd): fwd_(fwd) {}
-  auto begin() -> decltype(fwd_.rbegin()) const { return fwd_.rbegin(); }
-  auto end() -> decltype(fwd_.rend()) const  { return fwd_.rend(); }
-};
-
-template<class Fwd>
-Reverser<Fwd> make_reverse_iterator(const Fwd &fwd) { return Reverser<Fwd>(fwd); }
-
 ///// vector
 
 template<class T>
 class SArray
 {
-  u32 n_ = 0;
+  u64 n_ = 0;
   T *a_ = nullptr;
   bool is_created_ = false;
 public:
@@ -358,23 +363,23 @@ public:
       delete[] a_;
   }
 
-  void init(u32 n) {
+  void init(u64 n) {
     assert(! a_ && ! is_created_); // not loaded
     is_created_ = true;
     n_ = n;
     a_ = new T[n];
   }
 
-  void init(u32 n, const T &x) {
+  void init(u64 n, const T &x) {
     init(n);
     fill_n(a_, n, x);
   }
 
-  u32 size() const { return n_; }
+  u64 size() const { return n_; }
 
-  T &operator[](u32 i) { return a_[i]; }
+  T &operator[](u64 i) { return a_[i]; }
 
-  const T &operator[](u32 i) const { return a_[i]; }
+  const T &operator[](u64 i) const { return a_[i]; }
 
   T *begin() { return a_; }
 
@@ -386,68 +391,76 @@ public:
     //if (n_ >= 3000)
     //printf("+ %ld * %d\n", sizeof(T), n_);
   }
+
+  template<typename Archive>
+  void deserialize(Archive &ar) {
+    ar & n_;
+    ar.align(alignof(T));
+    a_ = (T*)ar.a_;
+    ar.a_ = (T*)ar.a_ + n_;
+  }
 };
 
 ///// bitset
 
 class BitSet
 {
-  u32 n_;
+  u64 n_;
   SArray<u64> a_;
 public:
   BitSet() {}
 
-  BitSet(u32 n) {
+  BitSet(u64 n) {
     init(n);
   }
 
-  void init(u32 n) {
+  void init(u64 n) {
     n_ = n;
     a_.init((n-1+64)/64, 0);
   }
 
   const SArray<u64> &words() const { return a_; }
 
-  void set(u32 x) { set(x, true); }
+  void set(u64 x) { set(x, true); }
 
-  void set(u32 x, bool b) {
+  void set(u64 x, bool b) {
     if (b)
       a_[x/64] |= 1ull << x%64;
     else
       a_[x/64] &= ~ (1ull << x%64);
   }
 
-  bool operator[](u32 x) const {
+  bool operator[](u64 x) const {
     return a_[x/64] & 1ull << x%64;
   }
 
-  u64 get_bits(u32 x, u32 k) const {
+  u64 get_bits(u64 x, u64 k) const {
     if (x % 64 + k <= 64)
       return (a_[x/64] >> x%64) & (1ull<<k)-1;
     return (a_[x/64] >> x%64 | a_[x/64+1] << 64-x%64) & (1ull<<k)-1;
   }
 
-  u64 block(u32 k, u32 x) const { return get_bits(x*k, k); }
+  u64 block(u64 k, u64 x) const { return get_bits(x*k, k); }
 
-  void set_bits(u32 x, u32 k, u64 v) {
+  void set_bits(u64 x, u64 k, u64 v) {
     if (! k) return;
     if (x % 64 + k <= 64) {
-      u32 i = x%64;
+      u64 i = x%64;
       a_[x/64] = a_[x/64] & ~ (((1ull<<k)-1) << i) | v << i;
     } else {
-      u32 i = x%64;
+      u64 i = x%64;
       a_[x/64] = a_[x/64] & ~ (-1ull<<i) | v << i;
-      u32 j = k-(64-i);
+      u64 j = k-(64-i);
       a_[x/64+1] = a_[x/64+1] & (-1ull<<j) | v >> 64-i;
     }
   }
 
-  u32 size() const {
+  u64 size() const {
     return n_;
   }
 
-  u32 popcount() const {
-    u32 r = 0;
+  u64 popcount() const {
+    u64 r = 0;
     REP(i, a_.size())
       r += __builtin_popcountll(a_[i]);
     return r;
@@ -608,173 +621,75 @@ namespace KoAluru
       delete[] t;
     }
   }
-
-  // Juha Kärkkäinen et al.'s Φ permulated LCP construction algorithm
-  template<typename T>
-  void calc_lcp(T a[], int sa[], int n, int plcp[], int lcp[])
-  {
-    REP(i, n)
-      plcp[sa[i]] = i ? sa[i-1] : -1; // plcp -> phi
-    int l = 0;
-    REP(i, n) {
-      int j = plcp[i];
-      if (j != -1)
-        for (; a[i+l] == a[j+l]; l++);
-      plcp[i] = l;
-      l && l--;
-    }
-    REP(i, n)
-      lcp[i] = plcp[sa[i]];
-  }
-
-  void calc_child(int lcp[], int n, int child[]) {
-    stack<int> st;
-    st.push(0);
-    int last = -1;
-    fill_n(child, n, -1);
-    FOR(i, 1, n) {
-      while (lcp[i] < lcp[st.top()]) {
-        last = st.top();
-        st.pop();
-        if (lcp[i] <= lcp[st.top()] && lcp[st.top()] != lcp[last])
-          child[st.top()] = last;
-      }
-      if (last != -1) {
-        child[i-1] = last;
-        last = -1;
-      }
-      st.push(i);
-    }
-    while (0 < lcp[st.top()]) {
-      last = st.top();
-      st.pop();
-      if (0 <= lcp[st.top()] && lcp[st.top()] != lcp[last])
-        child[st.top()] = last;
-    }
-
-    while (! st.empty())
-      st.pop();
-    st.push(0);
-    FOR(i, 1, n) {
-      while (lcp[i] < lcp[st.top()])
-        st.pop();
-      if (lcp[i] == lcp[st.top()]) {
-        child[st.top()] = i;
-        st.pop();
-      }
-      st.push(i);
-    }
-  }
-
-  int get_lcp(int lcp[], int child[], int i, int j)
-  {
-    if (i == j-1) return lcp[j];
-    int k = child[j-1]; // up[j]
-    if (i < k && k <= j)
-      return lcp[k];
-    return child[i] != -1 ? lcp[child[i]] : -1; // down[j]
-  }
-
-  void get_child_intervals(int lcp[], int child[], int l, int h)
-  {
-    printf("(%d %d)\n", l, h);
-    if (l >= h-1) return;
-    int i = l < child[h-1] && child[h-1] < h ? child[h-1] : child[l];
-    get_child_intervals(lcp, child, l, i);
-    for (; child[i] > i && lcp[child[i]] == lcp[i]; i = child[i]) // next[i]
-      get_child_intervals(lcp, child, i, child[i]);
-    get_child_intervals(lcp, child, i, h);
-  }
-
-  template<typename T>
-  pair<int, int> get_interval(T a[], int sa[], int lcp[], int child[], int n, int l, int h, int d, T c)
-  {
-    int i = h < n && l < child[h-1] && child[h-1] < h ? child[h-1] : child[l];
-    if (sa[l]+d < n && a[sa[l]+d] == c)
-      return make_pair(l, i);
-    for (; child[i] > i && lcp[child[i]] == lcp[i]; i = child[i]) { // next[i]
-      if (a[sa[i]+d] == c)
-        return make_pair(i, child[i]);
-    }
-    if (a[sa[i]+d] == c)
-      return make_pair(i, h);
-    return make_pair(-1,-1);
-  }
-
-  void top_down_traversal(int lcp[], int child[], int n)
-  {
-    get_child_intervals(lcp, child, 0, n);
-  }
-
-  template<typename T>
-  pair<int, int> search(T a[], int sa[], int lcp[], int child[], int n, const T s[], int m)
-  {
-    if (m == 0)
-      return make_pair(0, n);
-    pair<int, int> sub = get_interval(a, sa, lcp, child, n, 0, n, 0, s[0]);
-    int l = sub.first, h = sub.second, i = 1;
-    bool found = true;
-    while (found && i < m) {
-      if (l < h-1) {
-        int j = min(get_lcp(lcp, child, l, h), m);
-        FOR(k, i, j) {
-          if (a[sa[l]+k] != s[k]) {
-            found = false;
-            break;
-          }
-        }
-        i = j;
-        if (i < m) {
-          sub = get_interval(a, sa, lcp, child, n, l, h, i, s[i]);
-          l = sub.first;
-          h = sub.second;
-        }
-      } else {
-        FOR(k, i, m) {
-          if (a[sa[l]+k] != s[k]) {
-            found = false;
-            break;
-          }
-        }
-        i = m;
-      }
-    }
-    return found ? make_pair(l, h) : make_pair(-1, -1);
-  }
 };
 
 /// RRR
 
+namespace RRRTable
+{
+  static const u64 SIZE = 20;
+  vector<vector<u64>> binom;
+  vector<vector<u32>> offset_bits, combinations(SIZE), klass_offset(SIZE), offset_pos(SIZE);
+
+  void init() {
+    REP(i, SIZE) {
+      combinations[i].resize(1ull<<i);
+      klass_offset[i].resize(i+1);
+      offset_pos[i].resize(1ull<<i);
+      u64 pcomb = 0;
+      REP(klass, i+1) {
+        u64 j = 0, start = (1ull<<klass)-1, stop = start<<i-klass, x = start;
+        klass_offset[i][klass] = pcomb;
+        for(;;) {
+          combinations[i][pcomb++] = x;
+          offset_pos[i][x] = j++;
+          if (x == stop) break;
+          u64 y = x | x-1;
+          x = y+1 | (~y&-~y)-1 >> __builtin_ctzll(x)+1;
+        }
+      }
+      assert(pcomb == (1ull << i));
+    }
+  }
+
+  void raise(long size) {
+    FOR(i, binom.size(), size) {
+      binom.emplace_back(i+1);
+      binom[i][0] = binom[i][i] = 1;
+      FOR(j, 1, i)
+        binom[i][j] = binom[i-1][j-1]+binom[i-1][j];
+      offset_bits.emplace_back(i+1);
+      REP(j, i+1)
+        offset_bits[i][j] = clog2(binom[i][j]);
+    }
+  }
+};
+
 class RRR
 {
-  static const int USE_TABLE_THRESHOLD = 15;
-  u32 n_, block_len_, sample_len_, rank_sum_;
-  u32 nblocks_, nsamples_, klass_bits_, rsample_bits_, osample_bits_;
-  u64 **binom_ = nullptr;
-  u16 *offset_bits_, *combinations_, *klass_offset_, *offset_pos_;
-  BitSet klasses_, offsets_, rank_samples_, offset_samples_;
+  u64 n, block_len, sample_len, rank_sum, nblocks, nsamples, klass_bits, rsample_bits, osample_bits;
+  BitSet klasses, offsets, rank_samples, offset_samples;
 
-  u32 block2offset(u32 k, u64 x) const {
-    if (block_len_ <= USE_TABLE_THRESHOLD)
-      return offset_pos_[x];
-    u32 m = block_len_-1, r = 0;
+  u64 block2offset(u64 k, u64 x) const {
+    if (block_len < RRRTable::SIZE)
+      return RRRTable::offset_pos[block_len][x];
+    u64 m = block_len-1, r = 0;
     for (; k; m--)
       if (x & 1ull << m) {
         if (k <= m)
-          r += binom_[m][k];
+          r += RRRTable::binom[m][k];
         k--;
       }
     return r;
   }
 
-  u64 offset2block(u32 k, u32 off) const {
-    if (block_len_ <= USE_TABLE_THRESHOLD)
-      return combinations_[klass_offset_[k]+off];
-    u32 m = block_len_-1;
-    u64 r = 0;
+  u64 offset2block(u64 k, u64 off) const {
+    if (block_len < RRRTable::SIZE)
+      return RRRTable::combinations[block_len][RRRTable::klass_offset[block_len][k]+off];
+    u64 m = block_len-1, r = 0;
     for (; k && k <= m; m--)
-      if (binom_[m][k] <= off) {
-        off -= binom_[m][k--];
+      if (RRRTable::binom[m][k] <= off) {
+        off -= RRRTable::binom[m][k--];
         r |= 1ull << m;
       }
     if (k)
@@ -782,258 +697,220 @@ class RRR
     return r;
   }
 public:
-  void init(u32 n, u32 block_len, u32 sample_len, const BitSet &data) {
-    n_ = n;
-    block_len_ = block_len ? block_len : max(clog2(n), u32(15));
-    sample_len_ = sample_len ? sample_len : rrr_sample_rate;
-    compute_tables();
+  void init(u64 n, u64 block_len, u64 sample_len, const BitSet &data) {
+    this->n = n;
+    this->block_len = block_len ? block_len : max(clog2(n), u64(15));
+    this->sample_len = sample_len ? sample_len : rrr_sample_rate;
+    auto& binom = RRRTable::binom;
+    auto& offset_bits = RRRTable::offset_bits;
+    RRRTable::raise(this->block_len+1);
     build(data);
   }
 
   void build(const BitSet &data) {
-    nblocks_ = (n_-1+block_len_)/block_len_;
-    rank_sum_ = 0;
-    u32 offset_sum = 0;
-    REP(i, nblocks_) {
-      u32 o = block_len_*i, ol = min(block_len_, n_-o);
-      u64 val = data.get_bits(o, ol);
-      u32 klass = __builtin_popcountll(val);
-      rank_sum_ += klass;
-      offset_sum += offset_bits_[klass];
+    const auto& offset_bits = RRRTable::offset_bits[block_len];
+    nblocks = (n-1+block_len)/block_len;
+    rank_sum = 0;
+    u64 offset_sum = 0, o = 0;
+    REP(i, nblocks) {
+      u64 val = data.get_bits(o, min(block_len, n-o)), klass = __builtin_popcountll(val);
+      o += block_len;
+      rank_sum += klass;
+      offset_sum += offset_bits[klass];
     }
-    nsamples_ = (nblocks_-1+sample_len_)/sample_len_;
-    klass_bits_ = clog2(block_len_+1);
-    rsample_bits_ = clog2(rank_sum_);
-    osample_bits_ = clog2(offset_sum);
-    klasses_.init(klass_bits_*nblocks_);
-    offsets_.init(offset_sum);
-    rank_samples_.init(rsample_bits_*nsamples_);
-    offset_samples_.init(osample_bits_*nsamples_);
+    nsamples = (nblocks-1+sample_len)/sample_len;
+    klass_bits = clog2(block_len+1);
+    rsample_bits = clog2(rank_sum);
+    osample_bits = clog2(offset_sum);
+    klasses.init(klass_bits*nblocks);
+    offsets.init(offset_sum);
+    rank_samples.init(rsample_bits*nsamples);
+    offset_samples.init(osample_bits*nsamples);
 
-    rank_sum_ = offset_sum = 0;
-    REP(i, nblocks_) {
-      if (i % sample_len_ == 0) {
-        rank_samples_.set_bits(i/sample_len_*rsample_bits_, rsample_bits_, rank_sum_);
-        offset_samples_.set_bits(i/sample_len_*osample_bits_, osample_bits_, offset_sum);
+    rank_sum = offset_sum = o = 0;
+    REP(i, nblocks) {
+      if (i % sample_len == 0) {
+        rank_samples.set_bits(i/sample_len*rsample_bits, rsample_bits, rank_sum);
+        offset_samples.set_bits(i/sample_len*osample_bits, osample_bits, offset_sum);
       }
-      u32 o = block_len_*i, ol = min(block_len_, n_-o);
-      u64 val = data.get_bits(o, ol);
-      u32 klass = __builtin_popcountll(val);
-      klasses_.set_bits(klass_bits_*i, klass_bits_, klass);
-      rank_sum_ += klass;
-      offsets_.set_bits(offset_sum, offset_bits_[klass], block2offset(klass, val));
-      offset_sum += offset_bits_[klass];
+      u64 val = data.get_bits(o, min(block_len, n-o)), klass = __builtin_popcountll(val);
+      o += block_len;
+      klasses.set_bits(klass_bits*i, klass_bits, klass);
+      rank_sum += klass;
+      offsets.set_bits(offset_sum, offset_bits[klass], block2offset(klass, val));
+      offset_sum += offset_bits[klass];
     }
   }
 
-  void compute_tables() {
-    binom_ = new u64*[block_len_+1];
-    offset_bits_ = new u16[block_len_+1];
-    REP(i, block_len_+1) {
-      binom_[i] = new u64[i+1];
-      binom_[i][0] = binom_[i][i] = 1;
-      FOR(j, 1, i)
-        binom_[i][j] = binom_[i-1][j-1]+binom_[i-1][j];
-    }
-    REP(i, block_len_+1)
-      offset_bits_[i] = clog2(binom_[block_len_][i]);
-    if (block_len_ <= 15) {
-      combinations_ = new u16[1<<block_len_];
-      klass_offset_ = new u16[block_len_+1];
-      offset_pos_ = new u16[1<<block_len_];
-      u32 pcomb = 0;
-      REP(klass, block_len_+1) {
-        u32 start = (1<<klass)-1, x = start;
-        klass_offset_[klass] = pcomb;
-        REP(i, binom_[block_len_][klass]) {
-          combinations_[pcomb++] = x;
-          offset_pos_[x] = i;
-          u32 y = x | x-1;
-          x = y+1 | (~y&-~y)-1 >> __builtin_ctz(x)+1;
-        }
-      }
-      assert(pcomb == (1 << block_len_));
-    }
-  }
+  u64 zero_bits() const { return n-rank_sum; }
 
-  ~RRR() {
-    REP(i, block_len_+1)
-      delete[] binom_[i];
-    delete[] binom_;
-    delete[] offset_bits_;
-    if (block_len_ <= USE_TABLE_THRESHOLD) {
-      delete[] combinations_;
-      delete[] klass_offset_;
-      delete[] offset_pos_;
-    }
-  }
+  u64 one_bits() const { return rank_sum; }
 
-  u32 zero_bits() const { return n_-rank_sum_; }
-
-  u32 one_bits() const { return rank_sum_; }
-
-  bool operator[](u32 i) const {
-    u32 b = i / block_len_,
-        bi = i % block_len_,
-        s = b / sample_len_,
-        j = s * sample_len_,
-        o = offset_samples_.block(osample_bits_, s);
+  bool operator[](u64 i) const {
+    const auto& offset_bits = RRRTable::offset_bits[block_len];
+    u64 b = i / block_len,
+        bi = i % block_len,
+        s = b / sample_len,
+        j = s * sample_len,
+        o = offset_samples.block(osample_bits, s);
     for (; j < b; j++)
-      o += offset_bits_[klasses_.block(klass_bits_, j)];
-    u32 k = klasses_.block(klass_bits_, j);
-    return offset2block(k, offsets_.get_bits(o, offset_bits_[k])) >> bi & 1;
+      o += offset_bits[klasses.block(klass_bits, j)];
+    u64 k = klasses.block(klass_bits, j);
+    return offset2block(k, offsets.get_bits(o, offset_bits[k])) >> bi & 1;
   }
 
-  u32 rank0(u32 i) const { return i-rank1(i); }
+  u64 rank0(u64 i) const { return i-rank1(i); }
 
-  u32 rank1(u32 i) const {
-    u32 b = i / block_len_,
-        bi = i % block_len_,
-        s = b / sample_len_,
-        j = s * sample_len_,
-        r = rank_samples_.block(rsample_bits_, s),
-        o = offset_samples_.block(osample_bits_, s),
+  u64 rank1(u64 i) const {
+    const auto& offset_bits = RRRTable::offset_bits[block_len];
+    u64 b = i / block_len,
+        bi = i % block_len,
+        s = b / sample_len,
+        j = s * sample_len,
+        r = rank_samples.block(rsample_bits, s),
+        o = offset_samples.block(osample_bits, s),
         k;
     for (; j < b; j++) {
-      k = klasses_.block(klass_bits_, j);
+      k = klasses.block(klass_bits, j);
       r += k;
-      o += offset_bits_[k];
+      o += offset_bits[k];
     }
-    k = klasses_.block(klass_bits_, j);
-    return r + __builtin_popcountll(offset2block(k, offsets_.get_bits(o, offset_bits_[k])) & (1u<<bi)-1);
+    k = klasses.block(klass_bits, j);
+    return r + __builtin_popcountll(offset2block(k, offsets.get_bits(o, offset_bits[k])) & (1ull<<bi)-1);
   }
 
-  u32 select0(u32 kth) const {
-    if (kth >= zero_bits()) return -1u;
-    u32 l = 0, h = nsamples_;
+  u64 select0(u64 kth) const {
+    if (kth >= zero_bits()) return -1ull;
+    const auto& offset_bits = RRRTable::offset_bits[block_len];
+    u64 l = 0, h = nsamples;
     while (l < h) {
-      u32 m = l+(h-l)/2, idx = m*sample_len_*block_len_;
-      if (idx - rank_samples_.block(rsample_bits_, m) <= kth)
+      u64 m = l+(h-l)/2, idx = m*sample_len*block_len;
+      if (idx - rank_samples.block(rsample_bits, m) <= kth)
         l = m+1;
       else
         h = m;
     }
 
-    u32 s = l-1,
-        b = sample_len_*s,
-        r = block_len_*b - rank_samples_.block(rsample_bits_, s),
-        o = offset_samples_.block(osample_bits_, s),
+    u64 s = l-1,
+        b = sample_len*s,
+        r = block_len*b - rank_samples.block(rsample_bits, s),
+        o = offset_samples.block(osample_bits, s),
         k;
     for (; ; b++) {
-      k = klasses_.block(klass_bits_, b);
-      if (r+block_len_-k > kth) break;
-      r += block_len_-k;
-      o += offset_bits_[k];
+      k = klasses.block(klass_bits, b);
+      if (r+block_len-k > kth) break;
+      r += block_len-k;
+      o += offset_bits[k];
     }
 
-    o = offsets_.get_bits(o, offset_bits_[k]);
-    return block_len_*b + select_in_u64(~ offset2block(k, o), kth-r);
+    o = offsets.get_bits(o, offset_bits[k]);
+    return block_len*b + select_in_u64(~ offset2block(k, o), kth-r);
   }
 
-  u32 select1(u32 kth) const {
-    if (kth >= rank_sum_) return -1u;
-    u32 l = 0, h = nsamples_;
+  u64 select1(u64 kth) const {
+    if (kth >= rank_sum) return -1ull;
+    const auto& offset_bits = RRRTable::offset_bits[block_len];
+    u64 l = 0, h = nsamples;
     while (l < h) {
-      u32 m = l+(h-l)/2;
-      if (rank_samples_.block(rsample_bits_, m) <= kth)
+      u64 m = l+(h-l)/2;
+      if (rank_samples.block(rsample_bits, m) <= kth)
         l = m+1;
       else
         h = m;
     }
 
-    u32 s = l-1,
-        b = sample_len_*s,
-        r = rank_samples_.block(rsample_bits_, s),
-        o = offset_samples_.block(osample_bits_, s),
+    u64 s = l-1,
+        b = sample_len*s,
+        r = rank_samples.block(rsample_bits, s),
+        o = offset_samples.block(osample_bits, s),
         k;
     for (; ; b++) {
-      k = klasses_.block(klass_bits_, b);
+      k = klasses.block(klass_bits, b);
       if (r+k > kth) break;
       r += k;
-      o += offset_bits_[k];
+      o += offset_bits[k];
     }
 
-    o = offsets_.get_bits(o, offset_bits_[k]);
-    return block_len_*b + select_in_u64(offset2block(k, o), kth-r);
+    o = offsets.get_bits(o, offset_bits[k]);
+    return block_len*b + select_in_u64(offset2block(k, o), kth-r);
   }
 
   template<class Archive>
   void serialize(Archive &ar) {
-    ar & n_ & block_len_ & sample_len_ & rank_sum_ & klasses_ & offsets_ & rank_samples_ & offset_samples_;
+    ar & n & block_len & sample_len & rank_sum & klasses & offsets & rank_samples & offset_samples;
   }
 
   template<class Archive>
   void deserialize(Archive &ar) {
     serialize(ar);
-    compute_tables();
-    nblocks_ = (n_-1+block_len_)/block_len_;
-    nsamples_ = (nblocks_-1+sample_len_)/sample_len_;
-    klass_bits_ = clog2(block_len_+1);
-    rsample_bits_ = clog2(rank_sum_);
-    osample_bits_ = clog2(offsets_.size());
+    nblocks = (n-1+block_len)/block_len;
+    nsamples = (nblocks-1+sample_len)/sample_len;
+    klass_bits = clog2(block_len+1);
+    rsample_bits = clog2(rank_sum);
+    osample_bits = clog2(offsets.size());
+    RRRTable::raise(block_len+1);
   }
 };
 
 class EliasFanoBuilder
 {
 public:
-  u32 n_, bound_, l_, num_ = 0, pos_ = 0;
-  BitSet lows_, highs_;
+  u64 n, bound, l, num = 0, pos = 0;
+  BitSet lows, highs;
 
-  EliasFanoBuilder(u32 n, u32 bound) : EliasFanoBuilder(n, bound, n && n <= bound ? 31 - __builtin_clz(bound / n) : 0) {}
+  EliasFanoBuilder(u64 n, u64 bound) : EliasFanoBuilder(n, bound, n && clog2(bound/n)) {}
 
-  EliasFanoBuilder(u32 n, u32 bound, u32 l) : n_(n), bound_(bound), l_(l), lows_(l*n), highs_((bound>>l_)+n+1) {}
+  EliasFanoBuilder(u64 n, u64 bound, u64 l) : n(n), bound(bound), l(l), lows(l*n), highs((bound>>l)+n+1) {}
 
-  void push(u32 x) {
-    if (l_) {
-      lows_.set_bits(pos_, l_, x & (1<<l_)-1);
-      pos_ += l_;
+  void push(u64 x) {
+    if (l) {
+      lows.set_bits(pos, l, x & (1ull<<l)-1);
+      pos += l;
     }
-    highs_.set((x>>l_) + num_++);
+    highs.set((x>>l) + num++);
   }
 };
 
-/// limit: n <= 2**30-2 (<-- highs.len() < 2**31)
 class EliasFano
 {
 public:
-  u32 n_, bound_, l_;
-  BitSet lows_;
-  RRR highs_;
+  u64 n, bound, l;
+  BitSet lows;
+  RRR highs;
 public:
   void init(EliasFanoBuilder &b) {
-    n_= b.n_;
-    bound_ = b.bound_;
-    l_ = b.l_;
-    lows_ = move(b.lows_);
-    highs_.init((bound_>>l_)+n_+1, 0, 0, b.highs_);
+    n = b.n;
+    bound = b.bound;
+    l = b.l;
+    lows = move(b.lows);
+    highs.init((bound>>l)+n+1, 0, 0, b.highs);
   }
 
-  u32 operator[](u32 idx) const {
-    u32 ret = highs_.select1(idx) - idx << l_;
-    if (l_)
-      ret |= lows_.get_bits(l_*idx, l_);
+  u64 operator[](u64 idx) const {
+    u64 ret = highs.select1(idx) - idx << l;
+    if (l)
+      ret |= lows.get_bits(l*idx, l);
     return ret;
   }
 
-  u32 rank(u32 x) const {
-    if (x > bound_) return n_;
-    u32 hi = x >> l_, lo = x & (1<<l_)-1;
-    u32 i = highs_.select0(hi),
+  u64 rank(u64 x) const {
+    if (x > bound) return n;
+    u64 hi = x >> l, lo = x & (1ull<<l)-1;
+    u64 i = highs.select0(hi),
         r = i - hi; // number of elements in highs <= hi
-    while (i && highs_[i-1] && (l_ ? lows_.get_bits((r-1)*l_, l_) : 0) >= lo)
+    while (i && highs[i-1] && (l ? lows.get_bits((r-1)*l, l) : 0) >= lo)
       i--, r--;
     return r;
   }
 
-  bool exist(u32 x) const {
-    u32 r = rank(x);
-    return r < n_ && operator[](r) == x;
+  bool exist(u64 x) const {
+    u64 r = rank(x);
+    return r < n && operator[](r) == x;
   }
 
   template<typename Archive>
   void serialize(Archive &ar) {
-    ar & n_ & bound_ & l_ & lows_ & highs_;
+    ar & n & bound & l & lows & highs;
   }
 };
 
@@ -1041,24 +918,23 @@ public:
 
 class WaveletMatrix
 {
-  static const int ALPHABET = 1 << CHAR_BIT;
-  u32 n_;
-  RRR rrr_[CHAR_BIT];
+  u64 n;
+  RRR rrr[LOGAB];
 public:
   WaveletMatrix() {}
 
   ~WaveletMatrix() {}
 
-  void init(u32 n, u8 *text, u8 *tmp) {
-    n_ = n;
+  void init(u64 n, u8 *text, u8 *tmp) {
+    this->n = n;
     BitSet bs(n);
-    REP(d, CHAR_BIT) {
-      u32 bit = CHAR_BIT-1-d;
+    REP(d, LOGAB) {
+      u64 bit = LOGAB-1-d;
       REP(i, n)
         bs.set(i, text[i] >> bit & 1);
-      rrr_[d].init(n, 0, 0, bs);
-      if (d < CHAR_BIT-1) {
-        u32 j = 0;
+      rrr[d].init(n, 0, 0, bs);
+      if (d < LOGAB-1) {
+        u64 j = 0;
         REP(i, n)
           if (! (text[i] >> bit & 1))
             tmp[j++] = text[i];
@@ -1070,49 +946,49 @@ public:
     }
   }
 
-  int operator[](u32 i) const { return at(i); }
-  int at(u32 i) const {
-    return at(0, 0, ALPHABET, i);
+  u64 operator[](u64 i) const { return at(i); }
+  u64 at(u64 i) const {
+    return at(0, 0, AB, i);
   }
-  int at(int d, int l, int h, u32 i) const {
+  u64 at(u64 d, u64 l, u64 h, u64 i) const {
     if (h-l == 1) return l;
-    int m = l+h >> 1;
-    u32 z = rrr_[d].zero_bits();
-    return ! rrr_[d][i]
-      ? at(d+1, l, m, rrr_[d].rank0(i))
-      : at(d+1, m, h, z+rrr_[d].rank1(i));
+    u64 m = l+h >> 1;
+    u64 z = rrr[d].zero_bits();
+    return ! rrr[d][i]
+      ? at(d+1, l, m, rrr[d].rank0(i))
+      : at(d+1, m, h, z+rrr[d].rank1(i));
   }
 
   // number of occurrences of symbol `x` in [0,i)
-  u32 rank(u32 x, u32 i) const {
-    return rank(0, 0, ALPHABET, x, i, 0);
+  u64 rank(u64 x, u64 i) const {
+    return rank(0, 0, AB, x, i, 0);
   }
-  u32 rank(int d, int l, int h, u32 x, u32 i, u32 p) const {
+  u64 rank(u64 d, u64 l, u64 h, u64 x, u64 i, u64 p) const {
     if (h-l == 1) return i-p;
-    int m = l+h >> 1;
-    u32 z = rrr_[d].zero_bits();
+    u64 m = l+h >> 1;
+    u64 z = rrr[d].zero_bits();
     return x < m
-      ? rank(d+1, l, m, x, rrr_[d].rank0(i), rrr_[d].rank0(p))
-      : rank(d+1, m, h, x, z+rrr_[d].rank1(i), z+rrr_[d].rank1(p));
+      ? rank(d+1, l, m, x, rrr[d].rank0(i), rrr[d].rank0(p))
+      : rank(d+1, m, h, x, z+rrr[d].rank1(i), z+rrr[d].rank1(p));
   }
   // position of `k`-th occurrence of symbol `x`
-  u32 select(u32 x, u32 k) const {
-    return select(0, 0, ALPHABET, x, k, 0);
+  u64 select(u64 x, u64 k) const {
+    return select(0, 0, AB, x, k, 0);
   }
-  u32 select(int d, int l, int h, u32 x, u32 k, u32 p) const {
+  u64 select(u64 d, u64 l, u64 h, u64 x, u64 k, u64 p) const {
     if (l == h-1) return p+k;
-    int m = l+h >> 1;
-    u32 z = rrr_[d].zero_bits();
+    u64 m = l+h >> 1;
+    u64 z = rrr[d].zero_bits();
     return x < m
-      ? rrr_[d].select0(select(d+1, l, m, x, k, rrr_[d].rank0(p)))
-      : rrr_[d].select1(select(d+1, m, h, x, k, z+rrr_[d].rank1(p)) - z);
+      ? rrr[d].select0(select(d+1, l, m, x, k, rrr[d].rank0(p)))
+      : rrr[d].select1(select(d+1, m, h, x, k, z+rrr[d].rank1(p)) - z);
   }
 
   template<typename Archive>
   void serialize(Archive &ar) {
-    ar & n_;
-    REP(i, CHAR_BIT)
-      ar & rrr_[i];
+    ar & n;
+    REP(i, LOGAB)
+      ar & rrr[i];
   }
 };
 
@@ -1120,35 +996,35 @@ public:
 
 class FMIndex
 {
-  u32 n_, samplerate_, initial_;
-  u32 cnt_lt_[257];
+  u64 n_, samplerate_, initial_;
+  u64 cnt_lt_[AB+1];
   EliasFano sampled_ef_;
   SArray<u32> ssa_;
   WaveletMatrix bwt_wm_;
 public:
-  void init(u32 n, const u8 *text, u32 samplerate) {
+  void init(u64 n, const u8 *text, u64 samplerate) {
     samplerate_ = samplerate;
     n_ = n;
 
-    u32 cnt = 0;
-    fill_n(cnt_lt_, 256, 0);
+    u64 cnt = 0;
+    fill_n(cnt_lt_, AB, 0);
     REP(i, n)
       cnt_lt_[text[i]]++;
-    REP(i, 256) {
-      u32 t = cnt_lt_[i];
+    REP(i, AB) {
+      u64 t = cnt_lt_[i];
       cnt_lt_[i] = cnt;
       cnt += t;
     }
-    cnt_lt_[256] = cnt;
+    cnt_lt_[AB] = cnt;
 
     int *sa = new int[n];
-    int *tmp = new int[max(n, u32(256))];
-    u32 sampled_n = (n-1+samplerate)/samplerate;
+    int *tmp = new int[max(2*n, u64(AB))];
+    u64 sampled_n = (n-1+samplerate)/samplerate;
     EliasFanoBuilder efb(sampled_n, n-1);
     ssa_.init(sampled_n);
 
-    u32 nn = 0;
-    KoAluru::main(text, sa, tmp, n, 256);
+    u64 nn = 0;
+    KoAluru::main(text, sa, tmp, n, AB);
     REP(i, n)
       if (sa[i] % samplerate == 0) {
         ssa_[nn++] = sa[i];
@@ -1156,6 +1032,7 @@ public:
       }
     sampled_ef_.init(efb);
 
+    // 'initial' is the position of '$' in BWT of text+'$'
     // BWT of text (sentinel character is implicit)
     u8 *bwt = (u8 *)tmp, *bwt_t = (u8 *)tmp+n;
     initial_ = -1;
@@ -1173,6 +1050,8 @@ public:
   pair<u32, u32> get_range(u32 m, const u8 *pattern) const {
     u8 c = pattern[m-1];
     u32 i = m-1, l = cnt_lt_[c], h = cnt_lt_[c+1];
+    // [l, h) denotes rows [l+1,h+1) of BWT matrix of text+'$'
+    // row 'i' of the first column of BWT matrix is mapped to row i+(i<initial_) of the last column
     while (l < h && i) {
       c = pattern[--i];
       l = cnt_lt_[c] + bwt_wm_.rank(c, l + (l < initial_));
@@ -1256,16 +1135,43 @@ struct Serializer
   }
 
   template<class T>
-  auto operator&(T &x) -> decltype(serialize_imp(x, 0), *this) {
+  Serializer& operator&(T &x) {
     serialize_imp(x, 0);
     return *this;
+  }
+
+  Serializer& operator&(u64 &x) {
+    // u64 scalars are serialized as u32 to save space
+    fwrite(&x, sizeof(u32), 1, fh_);
+    return *this;
+  }
+
+  void uint64(u64 &x) {
+    fwrite(&x, sizeof(u64), 1, fh_);
   }
 
   template<class S, class T>
   void array(S n, T *a) {
     operator&(n);
+    align(alignof(T));
     REP(i, n)
       operator&(a[i]);
+  }
+
+  template<class S>
+  void array(S n, u64 *a) {
+    operator&(n);
+    align(alignof(u64));
+    REP(i, n)
+      uint64(a[i]);
+  }
+
+  void align(size_t n) {
+    off_t o = ftello(fh_);
+    if (o == -1)
+      err_exit(EX_IOERR, "ftello");
+    if (o%n && fseek(fh_, o+n-o%n, SEEK_SET))
+      err_exit(EX_IOERR, "fseek");
   }
 };
 
@@ -1278,6 +1184,12 @@ struct Deserializer
   template<class T>
   Deserializer &operator&(T &x) {
     deserialize_imp0(x, 0);
+    return *this;
+  }
+
+  Deserializer& operator&(u64 &x) {
+    memcpy(&x, a_, sizeof(u32));
+    a_ = (u32 *)a_ + 1;
     return *this;
   }
 
@@ -1300,15 +1212,36 @@ struct Deserializer
   // fallback
   template<class T>
   void deserialize_imp1(T &x, long) {
-    x = *(T *)a_;
-    a_ = (void *)((T *)a_ + 1);
+    memcpy(&x, a_, sizeof(T));
+    a_ = (T *)a_ + 1;
+  }
+
+  void uint64(u64 &x) {
+    deserialize_imp1(x, 0);
   }
 
   template<class S, class T>
-  void array(S &n, T *&a) {
+  void array(S n, T *a) {
     operator&(n);
-    a = (T *)a_;
-    a_ = (void *)((T *)a_ + n);
+    REP(i, n)
+      operator&(a[i]);
+  }
+
+  template<class S>
+  void array(S n, u64 *a) {
+    operator&(n);
+    REP(i, n)
+      uint64(a[i]);
+  }
+
+  void align(size_t n) {
+    auto o = (uintptr_t)a_ % n;
+    if (o)
+      a_ = (void*)((uintptr_t)a_+o);
+  }
+
+  void skip(size_t n) {
+    a_ = (void*)((uintptr_t)a_+n);
   }
 };
 
@@ -1348,15 +1281,14 @@ void print_help(FILE *fh)
 
 struct Entry
 {
-  int fd, index_fd;
-  int size, index_size;
-  void *mmap, *index_mmap;
+  int data_fd, index_fd, data_size, index_size;
+  void *data_mmap, *index_mmap;
   FMIndex *fm;
   ~Entry() {
     delete fm;
-    munmap(mmap, size);
+    munmap(data_mmap, data_size);
     munmap(index_mmap, index_size);
-    close(fd);
+    close(data_fd);
     close(index_fd);
   }
 };
@@ -1371,169 +1303,214 @@ bool is_index(const string &path)
   return path.size() >= index_suffix.size() && path.substr(path.size()-index_suffix.size()) == index_suffix;
 }
 
-class Processor
+string to_path(string path, string name)
 {
-protected:
-  int inotify_fd_;
-  set<string> modified_;
-  map<int, string> wd2dir_;
-  map<string, int> dir2wd_;
+  if (! (path.size() && path.back() == '/'))
+    path += '/';
+  if (name.size() && name[0] == '/')
+    name = name.substr(1);
+  path += name;
+  return path;
+}
 
-  virtual bool is_index_mode() const = 0;
+string data_to_index(const string& path)
+{
+  return path+index_suffix;
+}
 
-  virtual void add_data(const string &) = 0;
+string index_to_data(const string& path)
+{
+  return path.substr(0, path.size()-index_suffix.size());
+}
 
-  virtual void rm_data(const string &) = 0;
+template<class Key, class Val>
+struct RefCountTreap {
+  ~RefCountTreap() { clear(); }
 
-  string to_path(const char *dir, const string &name) const {
-    return string(dir)+"/"+name;
-  }
-
-  int open_data(const string &path) const {
-    return open(path.c_str(), O_RDONLY);
-  }
-
-  int open_index(const string &path, int flags, mode_t mode = 0) const {
-    return open(path.c_str(), flags, mode);
-  }
-
-  void process_aux(int depth, int dir_fd, const char *path, const char *file) {
-    int fd = -1;
-    struct stat statbuf;
-    if (stat(path, &statbuf) < 0)
-      err_msg_g("stat");
-
-    if (S_ISREG(statbuf.st_mode)) {
-      if (is_data(path))
-        add_data(path);
-    } else if (S_ISDIR(statbuf.st_mode)) {
-      if (! opt_recursive && depth > 0) goto quit;
-
-      inotify_add_dir(path);
-
-      fd = openat(dir_fd < 0 ? AT_FDCWD : dir_fd, file, O_RDONLY);
-      if (fd < 0)
-        err_msg_g("failed to open `%s'", path);
-      DIR *dirp = fdopendir(fd);
-      if (! dirp)
-        err_msg_g("opendir");
-      struct dirent dirent, *dirt;
-      while (! readdir_r(dirp, &dirent, &dirt) && dirt)
-        if (strcmp(dirent.d_name, ".") && strcmp(dirent.d_name, "..")) {
-          char *sub_path;
-          if (asprintf(&sub_path, "%s/%s", path, dirent.d_name) < 0)
-            err_exit(EX_OSERR, "asprintf");
-          process_aux(depth+1, fd, sub_path, dirent.d_name);
-          free(sub_path);
-        }
-      closedir(dirp);
-      fd = -1;
+  struct Node {
+    Key key;
+    Val val;
+    Node* c[2] = {};
+    int refcnt = 1, pri;
+    Node(const Key& key, const Val& val) : key(key), val(val), pri(rand()) {}
+    Node(const Node& x) : key(x.key), val(x.val), c{x.c[0], x.c[1]}, pri(x.pri) {
+      if (c[0]) c[0]->refcnt++;
+      if (c[1]) c[1]->refcnt++;
     }
+    void unref() { if (! --refcnt) delete this; }
+    ~Node() {
+      if (c[0]) c[0]->unref();
+      if (c[1]) c[1]->unref();
+    }
+  } *root = nullptr;
+  static vector<Node*> roots;
 
-quit:;
-     if (fd >= 0)
-       close(fd);
+  void clear() {
+    if (root) {
+      root->unref();
+      root = nullptr;
+    }
   }
 
-  int inotify_add_dir(const char *dir) {
-    int wd = inotify_add_watch(inotify_fd_, dir, IN_CLOSE_WRITE | IN_CREATE | IN_DELETE | IN_IGNORED | IN_MODIFY | IN_MOVE | IN_MOVE_SELF);
+  Node* find(const Key& key) {
+    return find(root, key);
+  }
+  Node* find(Node* x, const Key& key) {
+    for(;;) {
+      if (x->key < key) x = x->c[0];
+      else if (x->key > key) x = x->c[1];
+      else break;
+    }
+    return x;
+  }
+
+
+  void insert(const Key& key, const Val& val) {
+    roots.push_back(root);
+    if (root) root->refcnt++;
+    insert(root, key, val);
+  }
+  void insert(Node*& x, const Key& key, const Val& val) {
+    if (! x)
+      x = new Node(key, val);
+    else {
+      x->unref();
+      x = new Node(*x);
+      long d = x->key < key;
+      insert(x->c[d], key, val);
+      if (x->c[d]->pri < x->pri)
+        zag(x, d);
+    }
+  }
+
+  void erase(const Key& key) {
+    roots.push_back(root);
+    if (root) root->refcnt++;
+    erase(root, key);
+  }
+  void erase(Node*& x, const Key& key) {
+    if (! x) return;
+    Node* y = x;
+    if (key < x->key)
+      x = new Node(*x), y->unref(), erase(x->c[0], key);
+    else if (key > x->key)
+      x = new Node(*x), y->unref(), erase(x->c[1], key);
+    else if (! x->c[0])
+      x = x->c[1], y->unref(), x && x->refcnt++;
+    else if (! x->c[1])
+      x = x->c[0], y->unref(), x && x->refcnt++;
+    else if (x->c[0]->key == key)
+      x = new Node(*x), y->unref(), erase(x->c[0], key);
+    else if (x->c[1]->key == key)
+      x = new Node(*x), y->unref(), erase(x->c[1], key);
+    else {
+      x = new Node(*x);
+      y->unref();
+      long d = x->c[0]->pri < x->c[1]->pri;
+      x->c[d]->unref();
+      x->c[d] = new Node(*x->c[d]);
+      zag(x, d);
+      erase(x->c[d^1], key);
+    }
+  }
+  void zag(Node*& x, long d) {
+    Node* y = x->c[d];
+    x->c[d] = y->c[d^1];
+    y->c[d^1] = x;
+    x = y;
+  }
+
+  struct Backward {
+    vector<Node*> st;
+    Node* x;
+    Backward(Node* x) : x(x) {}
+    void step() {
+      for (; x; x = x->c[1])
+        st.push_back(x);
+      if (st.size()) {
+        x = st.back();
+        st.pop_back();
+      }
+    }
+    Backward begin() {
+      step();
+      return *this;
+    }
+    Backward end() { return Backward(nullptr); }
+    bool operator!=(const Backward& o) { return x != o.x; }
+    Backward operator++() {
+      x = x->c[0];
+      step();
+      return *this;
+    }
+    Node& operator*() { return *x; }
+  };
+
+  Backward backward(Node* x) { return Backward(x); }
+};
+
+template<> vector<RefCountTreap<string, shared_ptr<Entry>>::Node*> RefCountTreap<string, shared_ptr<Entry>>::roots{};
+
+namespace Server
+{
+  int inotify_fd;
+  map<int, string> wd2dir;
+  map<string, int> dir2wd;
+  set<string> modified;
+  RefCountTreap<string, shared_ptr<Entry>> loaded;
+  pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+  pthread_cond_t cleaner_cond = PTHREAD_COND_INITIALIZER;
+  bool cleaner_quit = false;
+
+  void detached_thread(void* (*start_routine)(void*), void* data) {
+    ongoing++;
+    pthread_t tid;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    if (pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED))
+      err_exit(EX_OSERR, "pthread_attr_setdetachstate");
+    if (pthread_create(&tid, &attr, start_routine, data))
+      err_exit(EX_OSERR, "pthread_create");
+    pthread_attr_destroy(&attr);
+  }
+
+  int inotify_add_dir(const string& dir) {
+    int wd = inotify_add_watch(inotify_fd, dir.c_str(), IN_CLOSE_WRITE | IN_CREATE | IN_DELETE | IN_IGNORED | IN_MODIFY | IN_MOVE | IN_MOVE_SELF);
     if (wd < 0) {
-      err_msg("failed to inotify_add_watch `%s'", dir);
+      err_msg("failed to inotify_add_watch '%s'", dir.c_str());
       return wd;
     }
-    wd2dir_[wd] = dir;
-    dir2wd_[dir] = wd;
-    log_action("inotify_add_watch `%s'\n", dir);
+    wd2dir[wd] = dir;
+    dir2wd[dir] = wd;
+    log_action("inotify_add_watch '%s'\n", dir.c_str());
     return wd;
   }
 
-  void process() {
-    if (opt_inotify)
-      if ((inotify_fd_ = inotify_init()) < 0)
-        err_exit(EX_OSERR, "inotify_init");
-    for (auto dir: data_dir)
-      process_aux(0, -1, dir, dir);
+  void rm_data(const string& data_path) {
+    string index_path = data_to_index(data_path);
+    if (! unlink(index_path.c_str()))
+      log_action("unlinked %s\n", index_path.c_str());
+    else if (errno != ENOENT)
+      err_msg("failed to unlink %s", index_path.c_str());
+    if (loaded.find(data_path)) {
+      loaded.erase(index_path);
+      log_action("unloaded index of %s\n", data_path.c_str());
+    }
   }
 
-  void process_inotify() {
-    char buf[sizeof(inotify_event)+NAME_MAX+1];
-    int nread;
-    if ((nread = read(inotify_fd_, buf, sizeof buf)) <= 0)
-      err_exit(EX_OSERR, "failed to read inotify fd");
+  void* add_data_worker(void* data_path_) {
+    string* data_path = (string*)data_path_;
+    string index_path = data_to_index(*data_path);
+    int index_fd = -1, data_fd = -1;
+    off_t data_size;
+    void* data_mmap = MAP_FAILED;
+    FILE* fh = NULL;
     errno = 0;
-    for (auto *ev = (inotify_event *)buf; (char *)ev < (char *)buf+nread;
-         ev = (inotify_event *)((char *)ev + sizeof(inotify_event) + ev->len))
-      if (ev->len > 0 || ev->mask & (IN_IGNORED | IN_MOVE_SELF)) {
-        const char *dir = wd2dir_[ev->wd].c_str();
-        bool watched = is_index_mode() ? is_data(ev->name) : is_index(ev->name);
-        string path = to_path(dir, ev->name);
-        if (is_index(ev->name) && ! is_index_mode())
-          path = path.substr(0, path.size()-index_suffix.size()); // to data file path
-        if (ev->mask & (IN_CREATE | IN_MOVED_TO)) {
-          if (ev->mask & IN_CREATE)
-            log_event("CREATE %s\n", path.c_str());
-          else
-            log_event("MOVED_TO %s\n", path.c_str());
-
-          if (ev->mask & IN_ISDIR)
-            opt_recursive && inotify_add_dir(path.c_str());
-          else if (watched) {
-            struct stat statbuf;
-            if (lstat(path.c_str(), &statbuf) < 0) continue;
-            if (ev->mask & IN_MOVED_TO || S_ISLNK(statbuf.st_mode)) {
-              modified_.erase(path);
-              add_data(path);
-            } else
-              modified_.insert(path);
-          }
-        } else if (ev->mask & (IN_DELETE | IN_MOVED_FROM)) {
-          if (ev->mask & IN_DELETE)
-            log_event("DELETE %s\n", path.c_str());
-          else
-            log_event("MOVED_FROM %s\n", path.c_str());
-          if (watched && ! (ev->mask & IN_ISDIR)) {
-            modified_.erase(path);
-            rm_data(path);
-          }
-        } else if (ev->mask & IN_IGNORED) {
-          log_event("IGNORED %s\n", dir);
-          if (wd2dir_.count(ev->wd)) {
-            dir2wd_.erase(wd2dir_[ev->wd]);
-            wd2dir_.erase(ev->wd);
-          }
-        } else if (ev->mask & IN_MODIFY) {
-          if (watched)
-            modified_.insert(path);
-        } else if (ev->mask & IN_MOVE_SELF)
-          err_exit(EX_OSFILE, "`%s' has been moved", wd2dir_[ev->wd].c_str());
-        else if (ev->mask & IN_CLOSE_WRITE) {
-          if (modified_.count(path)) {
-            log_event("CLOSE_WRITE after MODIFY %s\n", path.c_str());
-            modified_.erase(path);
-            add_data(path);
-          }
-        }
-      }
-  }
-};
-
-class Indexer : public Processor
-{
-protected:
-  bool is_index_mode() const override { return true; }
-
-  void add_data(const string &data_path) override {
-    string index_path = data_path+index_suffix;
-    int index_fd = -1, pcap_fd = -1;
-    off_t pcap_size;
-    void *pcap_content = MAP_FAILED;
-    FILE *fh = NULL;
-    errno = 0;
-    if ((pcap_fd = open_data(data_path)) < 0)
+    if ((data_fd = open(data_path->c_str(), O_RDONLY)) < 0)
       goto quit;
-    if ((pcap_size = lseek(pcap_fd, 0, SEEK_END)) < 0)
+    if ((data_size = lseek(data_fd, 0, SEEK_END)) < 0)
       goto quit;
-    if ((index_fd = open_index(index_path, O_RDWR | O_CREAT, 0666)) < 0)
+    if ((index_fd = open(index_path.c_str(), O_RDWR | O_CREAT, 0666)) < 0)
       goto quit;
     {
       char buf[8];
@@ -1544,17 +1521,17 @@ protected:
       if (nread == 0)
        ;
       else if (nread < 4 || memcmp(buf, MAGIC_GOOD, 4))
-        log_status("index file %s: bad magic. rebuilding\n", index_path.c_str());
-      else if (nread < 8 || *((int*)buf+1) != pcap_size)
-        log_status("index file %s: mismatching length of data file. rebuilding\n", index_path.c_str());
+        log_status("index file %s: bad magic, rebuilding\n", index_path.c_str());
+      else if (nread < 8 || ((i32*)buf)[1] != data_size)
+        log_status("index file %s: mismatching length of data file, rebuilding\n", index_path.c_str());
       else
         goto quit;
     }
-    if (pcap_size > 0 && (pcap_content = mmap(NULL, pcap_size, PROT_READ, MAP_SHARED, pcap_fd, 0)) == MAP_FAILED)
+    if (data_size > 0 && (data_mmap = mmap(NULL, data_size, PROT_READ, MAP_SHARED, data_fd, 0)) == MAP_FAILED)
       goto quit;
     if (! (fh = fdopen(index_fd, "w")))
       goto quit;
-    if (pcap_size > 0) {
+    if (data_size > 0) {
       StopWatch sw;
       if (fseek(fh, 0, SEEK_SET) < 0)
         err_exit(EX_IOERR, "fseek");
@@ -1564,96 +1541,72 @@ protected:
         err_exit(EX_IOERR, "fputs");
       Serializer ar(fh);
       FMIndex fm;
-      fm.init(pcap_size, (const u8 *)pcap_content, fmindex_sample_rate);
+      fm.init(data_size, (const u8 *)data_mmap, fmindex_sample_rate);
       ar & fm;
       long index_size = ftell(fh);
       ftruncate(index_fd, index_size);
       fseek(fh, 0, SEEK_SET);
       fputs(MAGIC_GOOD, fh);
-      fwrite(&pcap_size, 4, 1, fh);
+      fwrite(&data_size, 4, 1, fh);
       if (ferror(fh)) {
         unlink(index_path.c_str());
         goto quit;
       }
-      log_action("created index of %s. data: %ld, index: %ld, used %.3lf s\n", data_path.c_str(), pcap_size, index_size, sw.elapsed());
+      log_action("created index of %s. data: %ld, index: %ld, used %.3lf s\n", data_path->c_str(), data_size, index_size, sw.elapsed());
     }
 quit:
     if (fh)
       fclose(fh);
     else if (index_fd >= 0)
       close(index_fd);
-    if (pcap_content != MAP_FAILED)
-      munmap(pcap_content, pcap_size);
-    if (pcap_fd >= 0)
-      close(pcap_fd);
+    if (data_mmap != MAP_FAILED)
+      munmap(data_mmap, data_size);
+    if (data_fd >= 0)
+      close(data_fd);
+    delete data_path;
     if (errno)
-      err_msg("failed to index %s", data_path.c_str());
+      err_msg("failed to index %s", data_path->c_str());
+    ongoing--;
+    return NULL;
   }
 
-  void rm_data(const string &data_path) override {
-    string index_path = data_path+index_suffix;
-    if (! unlink(index_path.c_str()))
-      log_action("unlinked %s\n", index_path.c_str());
-    else if (errno != ENOENT)
-      err_msg("failed to unlink %s", index_path.c_str());
+  void add_data(const string& data_path) {
+    detached_thread(add_data_worker, new string(data_path));
   }
 
-public:
-  void run() {
-    process();
-    if (! opt_inotify) return;
-    log_status("start inotify\n");
-    fd_set rfds;
-    for(;;) {
-      FD_ZERO(&rfds);
-      FD_SET(inotify_fd_, &rfds);
-      int res = select(inotify_fd_+1, &rfds, NULL, NULL, NULL);
-      if (res < 0) {
-        if (errno == EINTR) continue;
-        err_exit(EX_OSERR, "select");
-      }
-      process_inotify();
+  void rm_index(const string& index_path) {
+    string data_path = index_path.substr(index_path.size()-index_suffix.size());
+    if (! is_data(data_path)) return;
+    if (loaded.find(data_path)) {
+      loaded.erase(index_path);
+      log_action("unloaded index of %s\n", data_path.c_str());
     }
   }
-};
 
-class Server : public Processor
-{
-protected:
-  map<string, shared_ptr<Entry>> path2entry_;
-
-  struct WorkerData
-  {
-    int clifd;
-    map<string, shared_ptr<Entry>> path2entry;
-  };
-
-  bool is_index_mode() const override { return false; }
-
-  void add_data(const string &data_path) override {
-    string index_path = data_path+index_suffix;
+  void add_index(const string& index_path) {
+    string data_path = index_to_data(index_path);
+    if (! is_data(data_path)) return;
     auto entry = make_shared<Entry>();
-    entry->mmap = MAP_FAILED;
-    entry->index_mmap = MAP_FAILED;
+    entry->data_mmap = entry->index_mmap = MAP_FAILED;
     errno = 0;
-    if ((entry->fd = open_data(data_path)) < 0)
+    if ((entry->data_fd = open(data_path.c_str(), O_RDONLY)) < 0)
       goto quit;
-    if ((entry->index_fd = open_index(index_path, O_RDONLY)) < 0) {
+    if ((entry->index_fd = open(index_path.c_str(), O_RDONLY)) < 0) {
       if (errno == ENOENT) {
         errno = 0;
         log_status("skiping %s: no index\n", data_path.c_str());
       }
       goto quit;
     }
-    if ((entry->size = lseek(entry->fd, 0, SEEK_END)) < 0)
+    if ((entry->data_size = lseek(entry->data_fd, 0, SEEK_END)) < 0)
       goto quit;
     if ((entry->index_size = lseek(entry->index_fd, 0, SEEK_END)) < 0)
       goto quit;
-    if (entry->size > 0 && (entry->mmap = mmap(NULL, entry->size, PROT_READ, MAP_SHARED, entry->fd, 0)) == MAP_FAILED)
+    if (entry->data_size > 0 && (entry->data_mmap = mmap(NULL, entry->data_size, PROT_READ, MAP_SHARED, entry->data_fd, 0)) == MAP_FAILED)
       goto quit;
     if (entry->index_size > 0 && (entry->index_mmap = mmap(NULL, entry->index_size, PROT_READ, MAP_SHARED, entry->index_fd, 0)) == MAP_FAILED)
       goto quit;
-    rm_data(data_path);
+    rm_index(index_path);
     if (entry->index_size < 8) {
       log_status("invalid index file %s: length < 8\n", index_path.c_str());
       goto quit;
@@ -1662,7 +1615,7 @@ protected:
       log_status("index file %s: bad magic\n", index_path.c_str());
       goto quit;
     }
-    if (*((int*)entry->index_mmap+1) != entry->size) {
+    if (((int*)entry->index_mmap)[1] != entry->data_size) {
       log_status("index file %s: mismatching length of data file\n", index_path.c_str());
       goto quit;
     }
@@ -1670,31 +1623,237 @@ protected:
       Deserializer ar((char*)entry->index_mmap+strlen(MAGIC_GOOD)+4);
       entry->fm = new FMIndex;
       ar & *entry->fm;
-      path2entry_[data_path] = entry;
+      pthread_mutex_lock(&mutex);
+      loaded.insert(data_path, entry);
+      pthread_cond_signal(&cleaner_cond);
+      pthread_mutex_unlock(&mutex);
       log_action("loaded index of %s\n", data_path.c_str());
     }
     return;
 quit:
+    if (entry->data_mmap != MAP_FAILED)
+      munmap(entry->data_mmap, entry->data_size);
     if (entry->index_mmap != MAP_FAILED)
       munmap(entry->index_mmap, entry->index_size);
-    if (entry->mmap != MAP_FAILED)
-      munmap(entry->mmap, entry->size);
+    if (entry->data_fd >= 0)
+      close(entry->data_fd);
     if (entry->index_fd >= 0)
       close(entry->index_fd);
-    if (entry->fd >= 0)
-      close(entry->fd);
     if (errno)
       err_msg("failed to load index file %s", index_path.c_str());
   }
 
-  void rm_data(const string &data_path) override {
-    if (path2entry_.count(data_path)) {
-      path2entry_.erase(data_path);
-      log_action("unloaded index of %s\n", data_path.c_str());
+  void walk(long depth, long dir_fd, string path, const char* file) {
+    int fd = -1;
+    struct stat statbuf;
+    if (stat(path.c_str(), &statbuf) < 0)
+      err_msg_g("stat");
+    if (S_ISREG(statbuf.st_mode)) {
+      if (is_data(path)) add_data(path);
+      if (is_index(path)) add_index(path);
+    } else if (S_ISDIR(statbuf.st_mode)) {
+      if (! opt_recursive && depth > 0) goto quit;
+      if (inotify_fd >= 0)
+        inotify_add_dir(path);
+      fd = openat(dir_fd, file, O_RDONLY);
+      if (fd < 0)
+        err_msg_g("failed to open '%s'", path.c_str());
+      DIR* dirp = fdopendir(fd);
+      if (! dirp)
+        err_msg_g("opendir");
+      struct dirent dirent, *dirt;
+      while (! readdir_r(dirp, &dirent, &dirt) && dirt)
+        if (strcmp(dirent.d_name, ".") && strcmp(dirent.d_name, ".."))
+          walk(depth+1, fd, to_path(path, dirent.d_name), dirent.d_name);
+      closedir(dirp);
+      fd = -1;
     }
+
+quit:;
+     if (fd >= 0)
+       close(fd);
   }
 
-public:
+  void process_inotify() {
+    char buf[sizeof(inotify_event)+NAME_MAX+1];
+    int nread;
+    if ((nread = read(inotify_fd, buf, sizeof buf)) <= 0)
+      err_exit(EX_OSERR, "failed to read inotify fd");
+    errno = 0;
+    for (auto *ev = (inotify_event *)buf; (char *)ev < (char *)buf+nread;
+         ev = (inotify_event *)((char *)ev + sizeof(inotify_event) + ev->len))
+      if (ev->len > 0 || ev->mask & (IN_IGNORED | IN_MOVE_SELF)) {
+        const char* dir = wd2dir[ev->wd].c_str();
+        bool data = is_data(ev->name), index = is_index(ev->name);
+        string path = to_path(dir, ev->name);
+        if (ev->mask & (IN_CREATE | IN_MOVED_TO)) {
+          if (ev->mask & IN_CREATE)
+            log_event("CREATE %s\n", path.c_str());
+          else
+            log_event("MOVED_TO %s\n", path.c_str());
+
+          if (ev->mask & IN_ISDIR)
+            opt_recursive && inotify_add_dir(path.c_str());
+          else if (data || index) {
+            struct stat statbuf;
+            if (lstat(path.c_str(), &statbuf) < 0) continue;
+            if (ev->mask & IN_MOVED_TO || S_ISLNK(statbuf.st_mode)) {
+              modified.erase(path);
+              if (data) add_data(path);
+              if (index) add_index(path);
+            } else
+              modified.insert(path);
+          }
+        } else if (ev->mask & (IN_DELETE | IN_MOVED_FROM)) {
+          if (ev->mask & IN_DELETE)
+            log_event("DELETE %s\n", path.c_str());
+          else
+            log_event("MOVED_FROM %s\n", path.c_str());
+          if (! (ev->mask & IN_ISDIR)) {
+            modified.erase(path);
+            if (data) rm_data(path);
+            if (index) rm_index(path);
+          }
+        } else if (ev->mask & IN_IGNORED) {
+          log_event("IGNORED %s\n", dir);
+          if (wd2dir.count(ev->wd)) {
+            dir2wd.erase(wd2dir[ev->wd]);
+            wd2dir.erase(ev->wd);
+          }
+        } else if (ev->mask & IN_MODIFY) {
+          if (data || index)
+            modified.insert(path);
+        } else if (ev->mask & IN_MOVE_SELF)
+          err_exit(EX_OSFILE, "'%s' has been moved", wd2dir[ev->wd].c_str());
+        else if (ev->mask & IN_CLOSE_WRITE) {
+          if (modified.count(path)) {
+            log_event("CLOSE_WRITE after MODIFY %s\n", path.c_str());
+            modified.erase(path);
+            if (data) add_data(path);
+            if (index) add_index(path);
+          }
+        }
+      }
+  }
+
+  void* request_worker(void* connfd_) {
+    int connfd = intptr_t(connfd_);
+    char buf[BUF_SIZE] = {};
+    const char *p, *file_begin = buf, *file_end = nullptr;
+    int nread = 0;
+    timespec timeout;
+    {
+      double tmp;
+      timeout.tv_sec = modf(request_timeout, &tmp);
+      timeout.tv_nsec = tmp;
+    }
+
+    struct pollfd fds;
+    fds.fd = connfd;
+    fds.events = POLLIN;
+
+    for(;;) {
+      int ready = ppoll(&fds, 1, &timeout, NULL);
+      if (ready < 0) {
+        if (errno == EINTR) continue;
+        goto quit;
+      }
+      if (! ready) goto quit; // timeout
+      ssize_t t = read(connfd, buf+nread, sizeof buf-nread);
+      if (t < 0) goto quit;
+      if (! t) break;
+      nread += t;
+    }
+
+    for (p = buf; p < buf+nread && *p; p++);
+    if (++p >= buf+nread) goto quit;
+    file_begin = p;
+    for (; p < buf+nread && *p; p++);
+    if (++p >= buf+nread) goto quit;
+    file_end = p;
+    for (; p < buf+nread && *p; p++);
+    if (++p >= buf+nread) goto quit;
+
+    {
+      pthread_mutex_lock(&mutex);
+      auto* root = loaded.root;
+      if (root) root->refcnt++;
+      pthread_mutex_unlock(&mutex);
+
+      u32 len = buf+nread-p, total = 0, t;
+      // autocomplete
+      if (! buf[0]) {
+        typedef tuple<string, u32, string> cand_type;
+        u32 skip = 0;
+        vector<u32> res;
+        vector<cand_type> candidates;
+        for (auto& it: loaded.backward(root)) {
+          auto entry = it.val;
+          if (entry->data_size > 0) {
+            auto old_size = res.size();
+            string pattern = unescape(len, p);
+            entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), true, autocomplete_limit, skip, res);
+            FOR(i, old_size, res.size())
+              candidates.emplace_back(it.key, res[i], string((char*)entry->data_mmap+res[i], (char*)entry->data_mmap+min(long(entry->data_size), res[i]+len+autocomplete_length)));
+            if (res.size() >= autocomplete_limit) break;
+          }
+        }
+        sort(candidates.begin(), candidates.end());
+        candidates.erase(unique(candidates.begin(), candidates.end(), [](const cand_type &x, const cand_type &y) {
+                                return get<2>(x) == get<2>(y);
+                                }), candidates.end());
+        for (auto& cand: candidates)
+          if (dprintf(connfd, "%s\t%u\t%s\n", get<0>(cand).c_str(), get<1>(cand), escape(get<2>(cand)).c_str()) < 0)
+            goto quit;
+      } else {
+        char *end;
+        errno = 0;
+        u32 skip = strtol(buf, &end, 0);
+        if (! *end && ! errno) {
+          vector<u32> res;
+          for (auto& it: loaded.backward(root)) {
+            auto entry = it.val;
+            if ((! *file_begin || string(file_begin) <= it.key) && (! *file_end || it.key <= string(file_end)) && entry->data_size > 0) {
+              auto old_size = res.size();
+              string pattern = unescape(len, p);
+              total += entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), false, search_limit, skip, res);
+              FOR(i, old_size, res.size())
+                if (dprintf(connfd, "%s\t%u\t%u\n", it.key.c_str(), res[i], len) < 0)
+                  goto quit;
+              if (res.size() >= autocomplete_limit) break;
+            }
+          }
+          dprintf(connfd, "%u\n", total);
+        }
+      }
+
+      pthread_mutex_lock(&mutex);
+      if (root) root->unref();
+      pthread_mutex_unlock(&mutex);
+    }
+quit:
+    close(connfd);
+    ongoing--;
+    return NULL;
+  }
+
+  void* cleaner(void*) {
+    for(;;) {
+      pthread_mutex_lock(&mutex);
+      while (! cleaner_quit && loaded.roots.empty())
+        pthread_cond_wait(&cleaner_cond, &mutex);
+      while (loaded.roots.size()) {
+        if (loaded.roots.back())
+          loaded.roots.back()->unref();
+        loaded.roots.pop_back();
+      }
+      pthread_mutex_unlock(&mutex);
+      if (cleaner_quit) break;
+    }
+    ongoing--;
+    return NULL;
+  }
+
   void run() {
     signal(SIGPIPE, SIG_IGN); // SIGPIPE while writing to clients
 
@@ -1710,140 +1869,63 @@ public:
     if (listen(sockfd, 1) < 0)
       err_exit(EX_OSERR, "listen");
 
-    process();
-    log_status("start inotify\n");
+    // load existing
+    if (opt_inotify) {
+      if ((inotify_fd = inotify_init()) < 0)
+        err_exit(EX_OSERR, "inotify_init");
+      log_status("start inotify\n");
+    }
+    for (auto dir: data_dir)
+      walk(0, AT_FDCWD, dir, dir);
 
     while (request_count) {
-      fd_set rfds;
-      FD_ZERO(&rfds);
-      FD_SET(inotify_fd_, &rfds);
-      FD_SET(sockfd, &rfds);
-      int res = select(max(sockfd, inotify_fd_)+1, &rfds, NULL, NULL, NULL);
-      if (res < 0) {
-        if (errno == EINTR) continue;
-        err_exit(EX_OSERR, "select");
+      struct pollfd fds[3];
+      fds[0].fd = log_pipe[0];
+      fds[0].events = POLLIN;
+      fds[1].fd = sockfd;
+      fds[1].events = POLLIN;
+      int nfds = 2;
+      if (inotify_fd >= 0) {
+        fds[2].fd = inotify_fd;
+        fds[2].events = POLLIN;
+        nfds = 3;
       }
-      if (FD_ISSET(inotify_fd_, &rfds))
+      int ready = poll(fds, nfds, -1);
+      if (ready < 0) {
+        if (errno == EINTR) continue;
+        err_exit(EX_OSERR, "poll");
+      }
+      if (fds[0].revents & POLLIN) { // log pipe
+        char buf[BUF_SIZE];
+        ssize_t nread = read(log_pipe[0], buf, sizeof buf);
+        if (nread < 0) {
+          if (errno != EINTR)
+            err_exit(EX_IOERR, "read");
+        } else
+          write(STDOUT_FILENO, buf, nread);
+      }
+      if (fds[1].revents & POLLIN) { // socket
+        int connfd = accept(sockfd, NULL, NULL);
+        if (connfd < 0) err_exit(EX_OSERR, "accept");
+        detached_thread(request_worker, (void*)(intptr_t)connfd);
+        if (request_count > 0) request_count--;
+      }
+      if (2 < nfds && fds[2].revents & POLLIN) // inotifyfd
         process_inotify();
-      if (FD_ISSET(sockfd, &rfds)) {
-        int clifd = accept(sockfd, NULL, NULL);
-        if (clifd < 0)
-          err_exit(EX_OSERR, "accept");
-        pthread_t tid;
-        pthread_attr_t attr;
-        pthread_attr_init(&attr);
-        if (pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED))
-          err_exit(EX_OSERR, "pthread_attr_setdetachstate");
-        auto wd = new WorkerData;
-        wd->clifd = clifd;
-        wd->path2entry = path2entry_; // make a copy of path2entry to prevent race condition
-        pthread_create(&tid, &attr, worker, wd);
-        pthread_attr_destroy(&attr);
-        ongoing_requests++;
-        request_count && request_count--;
-      }
     }
-    close(inotify_fd_);
+    if (inotify_fd >= 0)
+      close(inotify_fd);
     close(sockfd);
-    while (ongoing_requests.load() > 0)
-      sleep(1);
+    cleaner_quit = true;
+    pthread_cond_signal(&cleaner_cond);
+    // destructors should be called after all readers & writers of RefCountTreap have finished
+    while (ongoing.load() > 0)
+      usleep(50*1000);
+    for (auto x: loaded.roots)
+      if (x)
+        x->unref();
   }
-
-  static void *worker(void *data_) {
-    auto data = (WorkerData *)data_;
-    char buf[BUF_SIZE];
-    const char *p, *search_type = buf, *file_begin = buf, *file_end = nullptr;
-    int nread = 0;
-    timeval timeout;
-    timeout.tv_sec = request_timeout_milli/1000;
-    timeout.tv_usec = request_timeout_milli%1000*1000;
-
-    for(;;) {
-      fd_set rfds;
-      FD_ZERO(&rfds);
-      FD_SET(data->clifd, &rfds);
-      int res = select(data->clifd+1, &rfds, NULL, NULL, &timeout); // Linux modifies timeout
-      if (res < 0) {
-        if (errno == EINTR) continue;
-        goto quit;
-      }
-      if (! res) // timeout
-        goto quit;
-      int t = read(data->clifd, buf+nread, sizeof buf-nread);
-      if (t < 0) goto quit;
-      if (! t) break;
-      nread += t;
-    }
-
-    for (p = buf; p < buf+nread && *p; p++);
-    if (++p >= buf+nread)
-      goto quit;
-    file_begin = p;
-    for (; p < buf+nread && *p; p++);
-    if (++p >= buf+nread)
-      goto quit;
-    file_end = p;
-    for (; p < buf+nread && *p; p++);
-    if (++p >= buf+nread)
-      goto quit;
-
-    {
-      bool autocomplete = *search_type == '\0';
-      u32 len = buf+nread-p, total = 0, t;
-      if (autocomplete) {
-        typedef tuple<string, u32, string> cand_type;
-        u32 skip = 0;
-        vector<u32> res;
-        vector<cand_type> candidates;
-        for (auto &ne: make_reverse_iterator(data->path2entry)) {
-          const string &name = ne.first;
-          auto entry = ne.second;
-          if (entry->size > 0) {
-            auto old_size = res.size();
-            string pattern = unescape(len, p);
-            entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), true, autocomplete_limit, skip, res);
-            FOR(i, old_size, res.size())
-              candidates.emplace_back(name, res[i], string((char*)entry->mmap+res[i], (char*)entry->mmap+min(long(entry->size), res[i]+len+autocomplete_length)));
-            if (res.size() >= autocomplete_limit) break;
-          }
-        }
-        sort(candidates.begin(), candidates.end());
-        candidates.erase(unique(candidates.begin(), candidates.end(), [](const cand_type &x, const cand_type &y) {
-                                return get<2>(x) == get<2>(y);
-                                }), candidates.end());
-        for (auto &cand: candidates)
-          if (dprintf(data->clifd, "%s\t%u\t%s\n", get<0>(cand).c_str(), get<1>(cand), escape(get<2>(cand)).c_str()) < 0)
-            goto quit;
-      } else {
-        char *end;
-        errno = 0;
-        u32 skip = strtol(search_type, &end, 0);
-        if (! *end && ! errno) {
-          vector<u32> res;
-          for (auto &ne: make_reverse_iterator(data->path2entry)) {
-            const string &data_path = ne.first;
-            auto entry = ne.second;
-            if ((! *file_begin || string(file_begin) <= data_path) && (! *file_end || data_path <= string(file_end)) && entry->size > 0) {
-              auto old_size = res.size();
-              string pattern = unescape(len, p);
-              total += entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), false, search_limit, skip, res);
-              FOR(i, old_size, res.size())
-                if (dprintf(data->clifd, "%s\t%u\t%u\n", data_path.c_str(), res[i], len) < 0)
-                  goto quit;
-              if (res.size() >= autocomplete_limit) break;
-            }
-          }
-          dprintf(data->clifd, "%u\n", total);
-        }
-      }
-    }
-quit:
-    close(data->clifd);
-    delete data;
-    ongoing_requests--;
-    return NULL;
-  }
-};
+}
 
 int main(int argc, char *argv[])
 {
@@ -1864,7 +1946,6 @@ int main(int argc, char *argv[])
     {"request-count",       required_argument, 0,   'c'},
     {"request-timeout",     required_argument, 0,   4},
     {"rrr-sample-rate",     required_argument, 0,   5},
-    {"search-limit",        required_argument, 0,   'l'},
     {0,                     0,                 0,   0},
   };
 
@@ -1886,7 +1967,7 @@ int main(int argc, char *argv[])
       autocomplete_limit = get_long(optarg);
       break;
     case 4:
-      request_timeout_milli = get_long(optarg);
+      request_timeout = get_double(optarg);
       break;
     case 5:
       rrr_sample_rate = get_long(optarg);
@@ -1931,18 +2012,16 @@ int main(int argc, char *argv[])
 
 #define D(name) printf("%s: %ld\n", #name, name)
 
-  if (is_index_mode) {
-    log_status("index mode\n");
-    D(fmindex_sample_rate);
-    D(rrr_sample_rate);
-    Indexer().run();
-  } else {
-    log_status("server mode\n");
-    D(autocomplete_length);
-    D(autocomplete_limit);
-    D(search_limit);
-    Server().run();
-  }
+  RRRTable::init();
+  if (pipe(log_pipe) < 0)
+    err_exit(EX_OSERR, "pipe");
+
+  D(fmindex_sample_rate);
+  D(rrr_sample_rate);
+  D(autocomplete_length);
+  D(autocomplete_limit);
+  D(search_limit);
+  Server::run();
 
 #undef D
 }
