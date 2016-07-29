@@ -45,14 +45,12 @@ using namespace std;
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
-typedef uint64_t u64;
 typedef int32_t i32;
+typedef unsigned long ulong;
 
 #define LEN_OF(x) (sizeof(x)/sizeof(*x))
 #define REP(i, n) FOR(i, 0, n)
-#define REPS(i, n, s) FORS(i, 0, n, s)
 #define FOR(i, a, b) for (typename std::remove_cv<typename std::remove_reference<decltype(b)>::type>::type i = (a); i < (b); i++)
-#define FORS(i, a, b, s) for (typename std::remove_cv<typename std::remove_reference<decltype(b)>::type>::type i = (a); i < (b); i += (s))
 #define ROF(i, a, b) for (typename std::remove_cv<typename std::remove_reference<decltype(b)>::type>::type i = (b); --i >= (a); )
 
 #define SGR0 "\x1b[m"
@@ -63,8 +61,8 @@ typedef int32_t i32;
 #define MAGENTA "\x1b[35m"
 #define CYAN "\x1b[36m"
 
-const char MAGIC_BAD[] = "BAD MEOW";
-const char MAGIC_GOOD[] = "GOODMEOW";
+const char MAGIC_BAD[] = "BAD MEOW"; // first sizeof(off_t) bytes
+const char MAGIC_GOOD[] = "GOODMEOW"; // first sizeof(off_t) bytes
 const long LOGAB = CHAR_BIT, AB = 1L << LOGAB;
 
 const size_t BUF_SIZE = 512;
@@ -85,22 +83,22 @@ bool opt_inotify = true;
 bool opt_recursive = false;
 
 ///// log
-int log_pipe[2];
 
 void log_generic(const char *prefix, const char *format, va_list ap)
 {
-  int fd = main_thread == pthread_self() ? STDOUT_FILENO : log_pipe[1];
-  char buf[BUF_SIZE];
+  int fd = STDOUT_FILENO;
+  char buf[BUF_SIZE], tim[BUF_SIZE], body[BUF_SIZE];
   timeval tv;
   tm tm;
   gettimeofday(&tv, NULL);
   write(fd, prefix, strlen(prefix));
-  if (localtime_r(&tv.tv_sec, &tm)) {
-    strftime(buf, sizeof buf, "%T.%%06u ", &tm);
-    dprintf(fd, buf, tv.tv_usec);
-  }
-  vdprintf(fd, format, ap);
-  write(fd, SGR0, strlen(SGR0));
+  if (localtime_r(&tv.tv_sec, &tm))
+    strftime(tim, sizeof tim, "%T", &tm);
+  else
+    tim[0] = '\0';
+  vsnprintf(body, sizeof body, format, ap);
+  snprintf(buf, sizeof buf, "%s%s.%06lu %s" SGR0 "\n", prefix, tim, tv.tv_usec, body);
+  write(fd, buf, strlen(buf));
 }
 
 void log_event(const char *format, ...)
@@ -216,7 +214,7 @@ void err_exit(int exitno, const char *format, ...)
   int nptrs = backtrace(bt, LEN_OF(buf));
   int i = sprintf(buf, "addr2line -Cfipe %s", program_invocation_name), j = 0;
   while (j < nptrs && i+30 < sizeof buf)
-    i += sprintf(buf+i, " %#x", bt[j++]);
+    i += sprintf(buf+i, " %#lx", (ulong)bt[j++]);
   strcat(buf, ">&2");
   fputs("\n", stderr);
   system(buf);
@@ -226,34 +224,44 @@ void err_exit(int exitno, const char *format, ...)
 
 ///// common
 
-u64 clog2(u64 x)
+ulong clog2(ulong x)
 {
-  return x > 1 ? 64-__builtin_clzll(x-1) : 0;
+  return x > 1 ? sizeof(ulong)*CHAR_BIT-__builtin_clzl(x-1) : 0;
 }
 
-u64 select_in_u16(u16 x, u64 k)
+ulong select_in_u16(u16 x, ulong k)
 {
   for (; k; k--)
     x &= x - 1;
-  return __builtin_ctzll(x);
+  return __builtin_ctzl(x);
 }
 
-u64 select_in_u64(u64 x, u64 k)
+ulong select_in_ulong(ulong x, ulong k)
 {
-  u64 c;
-  c =  __builtin_popcountll(u16(x));
+  ulong c;
+#if ULONG_MAX == 0xffffffffffffffff
+  c =  __builtin_popcountl(u16(x));
   if (c > k) return select_in_u16(x, k) + 0;
   x >>= 16;
   k -= c;
-  c =  __builtin_popcountll(u16(x));
+  c =  __builtin_popcountl(u16(x));
   if (c > k) return select_in_u16(x, k) + 16;
   x >>= 16;
   k -= c;
-  c =  __builtin_popcountll(u16(x));
+  c =  __builtin_popcountl(u16(x));
   if (c > k) return select_in_u16(x, k) + 32;
   x >>= 16;
   k -= c;
   return select_in_u16(x, k) + 48;
+#elif ULONG_MAX == 0xffffffff
+  c =  __builtin_popcountll(u16(x));
+  if (c > k) return select_in_u16(x, k) + 0;
+  x >>= 16;
+  k -= c;
+  return select_in_u16(x, k) + 48;
+#else
+# error "unsupported"
+#endif
 }
 
 long get_long(const char *arg)
@@ -341,63 +349,56 @@ string unescape(size_t n, const char *str)
 template<class T>
 class SArray
 {
-  u64 n_ = 0;
-  T *a_ = nullptr;
-  bool is_created_ = false;
+  ulong n = 0;
+  T *a = nullptr;
+  bool is_created = false;
 public:
   SArray() {}
-
   SArray(const SArray<T> &) = delete;
 
   void operator=(SArray<T> &&o) {
-    n_ = o.n_;
-    a_ = o.a_;
-    is_created_ = o.is_created_;
-    o.n_ = 0;
-    o.a_ = nullptr;
-    o.is_created_ = false;
+    n = o.n;
+    a = o.a;
+    is_created = o.is_created;
+    o.n = 0;
+    o.a = nullptr;
+    o.is_created = false;
   }
 
   ~SArray() {
-    if (is_created_)
-      delete[] a_;
+    if (is_created)
+      delete[] a;
   }
 
-  void init(u64 n) {
-    assert(! a_ && ! is_created_); // not loaded
-    is_created_ = true;
-    n_ = n;
-    a_ = new T[n];
+  void init(ulong n) {
+    assert(! a && ! is_created); // not loaded
+    is_created = true;
+    this->n = n;
+    a = new T[n];
   }
 
-  void init(u64 n, const T &x) {
+  void init(ulong n, const T &x) {
     init(n);
-    fill_n(a_, n, x);
+    fill_n(a, n, x);
   }
 
-  u64 size() const { return n_; }
-
-  T &operator[](u64 i) { return a_[i]; }
-
-  const T &operator[](u64 i) const { return a_[i]; }
-
-  T *begin() { return a_; }
-
-  T *end() { return a_+n_; }
+  ulong size() const { return n; }
+  T &operator[](ulong i) { return a[i]; }
+  const T &operator[](ulong i) const { return a[i]; }
+  T *begin() { return a; }
+  T *end() { return a+n; }
 
   template<typename Archive>
   void serialize(Archive &ar) {
-    ar.array(n_, a_);
-    //if (n_ >= 3000)
-    //printf("+ %ld * %d\n", sizeof(T), n_);
+    ar.array(n, a);
   }
 
   template<typename Archive>
   void deserialize(Archive &ar) {
-    ar & n_;
+    ar & n;
     ar.align(alignof(T));
-    a_ = (T*)ar.a_;
-    ar.a_ = (T*)ar.a_ + n_;
+    a = (T*)ar.a;
+    ar.skip(sizeof(T)*n);
   }
 };
 
@@ -405,70 +406,64 @@ public:
 
 class BitSet
 {
-  u64 n_;
-  SArray<u64> a_;
+  ulong n;
+  SArray<ulong> a;
 public:
+  static const long BITS = sizeof(long)*CHAR_BIT;
   BitSet() {}
+  BitSet(ulong n) { init(n); }
 
-  BitSet(u64 n) {
-    init(n);
+  void init(ulong n) {
+    this->n = n;
+    a.init((n-1+BITS)/BITS, 0);
   }
 
-  void init(u64 n) {
-    n_ = n;
-    a_.init((n-1+64)/64, 0);
-  }
+  const SArray<ulong> &words() const { return a; }
+  ulong size() const { return n; }
 
-  const SArray<u64> &words() const { return a_; }
+  void set(ulong x) { set(x, true); }
 
-  void set(u64 x) { set(x, true); }
-
-  void set(u64 x, bool b) {
+  void set(ulong x, bool b) {
     if (b)
-      a_[x/64] |= 1ull << x%64;
+      a[x/BITS] |= 1ul << x%BITS;
     else
-      a_[x/64] &= ~ (1ull << x%64);
+      a[x/BITS] &= ~ (1ul << x%BITS);
   }
 
-  bool operator[](u64 x) const {
-    return a_[x/64] & 1ull << x%64;
+  bool operator[](ulong x) const {
+    return a[x/BITS] & 1ul << x%BITS;
   }
 
-  u64 get_bits(u64 x, u64 k) const {
-    if (x % 64 + k <= 64)
-      return (a_[x/64] >> x%64) & (1ull<<k)-1;
-    return (a_[x/64] >> x%64 | a_[x/64+1] << 64-x%64) & (1ull<<k)-1;
+  ulong get_bits(ulong x, ulong k) const {
+    if (x % BITS + k <= BITS)
+      return (a[x/BITS] >> x%BITS) & (1ul<<k)-1;
+    return (a[x/BITS] >> x%BITS | a[x/BITS+1] << BITS-x%BITS) & (1ul<<k)-1;
   }
 
-  u64 block(u64 k, u64 x) const { return get_bits(x*k, k); }
+  ulong block(ulong k, ulong x) const { return get_bits(x*k, k); }
 
-  void set_bits(u64 x, u64 k, u64 v) {
+  void set_bits(ulong x, ulong k, ulong v) {
     if (! k) return;
-    if (x % 64 + k <= 64) {
-      u64 i = x%64;
-      a_[x/64] = a_[x/64] & ~ (((1ull<<k)-1) << i) | v << i;
+    if (x % BITS + k <= BITS) {
+      ulong i = x%BITS;
+      a[x/BITS] = a[x/BITS] & ~ (((1ul<<k)-1) << i) | v << i;
     } else {
-      u64 i = x%64;
-      a_[x/64] = a_[x/64] & ~ (-1ull<<i) | v << i;
-      u64 j = k-(64-i);
-      a_[x/64+1] = a_[x/64+1] & (-1ull<<j) | v >> 64-i;
+      ulong i = x%BITS, j = k-(BITS-i);
+      a[x/BITS] = a[x/BITS] & ~ (-1ul<<i) | v << i;
+      a[x/BITS+1] = a[x/64+1] & (-1ul<<j) | v >> 64-i;
     }
   }
 
-  u64 size() const {
-    return n_;
-  }
-
-  u64 popcount() const {
-    u64 r = 0;
-    REP(i, a_.size())
-      r += __builtin_popcountll(a_[i]);
+  ulong popcount() const {
+    ulong r = 0;
+    REP(i, a.size())
+      r += __builtin_popcountl(a[i]);
     return r;
   }
 
   template<typename Archive>
   void serialize(Archive &ar) {
-    ar & n_ & a_;
+    ar & n & a;
   }
 };
 
@@ -623,29 +618,28 @@ namespace KoAluru
 
 namespace RRRTable
 {
-  static const u64 SIZE = 20;
+  static const ulong SIZE = 20;
   static pthread_mutex_t rrr_mutex = PTHREAD_MUTEX_INITIALIZER;
-  vector<vector<u64>> binom;
-  vector<vector<u32>> offset_bits, combinations(SIZE), klass_offset(SIZE), offset_pos(SIZE);
+  vector<vector<u32>> binom, offset_bits, combinations(SIZE), klass_offset(SIZE), offset_pos(SIZE);
 
   void init() {
     REP(i, SIZE) {
-      combinations[i].resize(1ull<<i);
+      combinations[i].resize(1ul<<i);
       klass_offset[i].resize(i+1);
-      offset_pos[i].resize(1ull<<i);
-      u64 pcomb = 0;
+      offset_pos[i].resize(1ul<<i);
+      ulong pcomb = 0;
       REP(klass, i+1) {
-        u64 j = 0, start = (1ull<<klass)-1, stop = start<<i-klass, x = start;
+        ulong j = 0, start = (1ul<<klass)-1, stop = start<<i-klass, x = start;
         klass_offset[i][klass] = pcomb;
         for(;;) {
           combinations[i][pcomb++] = x;
           offset_pos[i][x] = j++;
           if (x == stop) break;
-          u64 y = x | x-1;
-          x = y+1 | (~y&-~y)-1 >> __builtin_ctzll(x)+1;
+          ulong y = x | x-1;
+          x = y+1 | (~y&-~y)-1 >> __builtin_ctzl(x)+1;
         }
       }
-      assert(pcomb == (1ull << i));
+      assert(pcomb == (1ul << i));
     }
   }
 
@@ -666,15 +660,15 @@ namespace RRRTable
 
 class RRR
 {
-  u64 n, block_len, sample_len, rank_sum, nblocks, nsamples, klass_bits, rsample_bits, osample_bits;
+  ulong n, block_len, sample_len, rank_sum, nblocks, nsamples, klass_bits, rsample_bits, osample_bits;
   BitSet klasses, offsets, rank_samples, offset_samples;
 
-  u64 block2offset(u64 k, u64 x) const {
+  ulong block2offset(ulong k, ulong x) const {
     if (block_len < RRRTable::SIZE)
       return RRRTable::offset_pos[block_len][x];
-    u64 m = block_len-1, r = 0;
+    ulong m = block_len-1, r = 0;
     for (; k; m--)
-      if (x & 1ull << m) {
+      if (x & 1ul << m) {
         if (k <= m)
           r += RRRTable::binom[m][k];
         k--;
@@ -682,23 +676,23 @@ class RRR
     return r;
   }
 
-  u64 offset2block(u64 k, u64 off) const {
+  ulong offset2block(ulong k, ulong off) const {
     if (block_len < RRRTable::SIZE)
       return RRRTable::combinations[block_len][RRRTable::klass_offset[block_len][k]+off];
-    u64 m = block_len-1, r = 0;
+    ulong m = block_len-1, r = 0;
     for (; k && k <= m; m--)
       if (RRRTable::binom[m][k] <= off) {
         off -= RRRTable::binom[m][k--];
-        r |= 1ull << m;
+        r |= 1ul << m;
       }
     if (k)
-      r |= (1ull<<k) - 1;
+      r |= (1ul<<k) - 1;
     return r;
   }
 public:
-  void init(u64 n, u64 block_len, u64 sample_len, const BitSet &data) {
+  void init(ulong n, ulong block_len, ulong sample_len, const BitSet &data) {
     this->n = n;
-    this->block_len = block_len ? block_len : max(clog2(n), u64(15));
+    this->block_len = block_len ? block_len : max(clog2(n), ulong(15));
     this->sample_len = sample_len ? sample_len : rrr_sample_rate;
     auto& binom = RRRTable::binom;
     auto& offset_bits = RRRTable::offset_bits;
@@ -710,9 +704,9 @@ public:
     const auto& offset_bits = RRRTable::offset_bits[block_len];
     nblocks = (n-1+block_len)/block_len;
     rank_sum = 0;
-    u64 offset_sum = 0, o = 0;
+    ulong offset_sum = 0, o = 0;
     REP(i, nblocks) {
-      u64 val = data.get_bits(o, min(block_len, n-o)), klass = __builtin_popcountll(val);
+      ulong val = data.get_bits(o, min(block_len, n-o)), klass = __builtin_popcountl(val);
       o += block_len;
       rank_sum += klass;
       offset_sum += offset_bits[klass];
@@ -732,7 +726,7 @@ public:
         rank_samples.set_bits(i/sample_len*rsample_bits, rsample_bits, rank_sum);
         offset_samples.set_bits(i/sample_len*osample_bits, osample_bits, offset_sum);
       }
-      u64 val = data.get_bits(o, min(block_len, n-o)), klass = __builtin_popcountll(val);
+      ulong val = data.get_bits(o, min(block_len, n-o)), klass = __builtin_popcountl(val);
       o += block_len;
       klasses.set_bits(klass_bits*i, klass_bits, klass);
       rank_sum += klass;
@@ -741,60 +735,60 @@ public:
     }
   }
 
-  u64 zero_bits() const { return n-rank_sum; }
+  ulong zero_bits() const { return n-rank_sum; }
 
-  u64 one_bits() const { return rank_sum; }
+  ulong one_bits() const { return rank_sum; }
 
-  bool operator[](u64 i) const {
+  bool operator[](ulong i) const {
     const auto& offset_bits = RRRTable::offset_bits[block_len];
-    u64 b = i / block_len,
-        bi = i % block_len,
-        s = b / sample_len,
-        j = s * sample_len,
-        o = offset_samples.block(osample_bits, s);
+    ulong b = i / block_len,
+          bi = i % block_len,
+          s = b / sample_len,
+          j = s * sample_len,
+          o = offset_samples.block(osample_bits, s);
     for (; j < b; j++)
       o += offset_bits[klasses.block(klass_bits, j)];
-    u64 k = klasses.block(klass_bits, j);
+    ulong k = klasses.block(klass_bits, j);
     return offset2block(k, offsets.get_bits(o, offset_bits[k])) >> bi & 1;
   }
 
-  u64 rank0(u64 i) const { return i-rank1(i); }
+  ulong rank0(ulong i) const { return i-rank1(i); }
 
-  u64 rank1(u64 i) const {
+  ulong rank1(ulong i) const {
     const auto& offset_bits = RRRTable::offset_bits[block_len];
-    u64 b = i / block_len,
-        bi = i % block_len,
-        s = b / sample_len,
-        j = s * sample_len,
-        r = rank_samples.block(rsample_bits, s),
-        o = offset_samples.block(osample_bits, s),
-        k;
+    ulong b = i / block_len,
+          bi = i % block_len,
+          s = b / sample_len,
+          j = s * sample_len,
+          r = rank_samples.block(rsample_bits, s),
+          o = offset_samples.block(osample_bits, s),
+          k;
     for (; j < b; j++) {
       k = klasses.block(klass_bits, j);
       r += k;
       o += offset_bits[k];
     }
     k = klasses.block(klass_bits, j);
-    return r + __builtin_popcountll(offset2block(k, offsets.get_bits(o, offset_bits[k])) & (1ull<<bi)-1);
+    return r + __builtin_popcountl(offset2block(k, offsets.get_bits(o, offset_bits[k])) & (1ul<<bi)-1);
   }
 
-  u64 select0(u64 kth) const {
-    if (kth >= zero_bits()) return -1ull;
+  ulong select0(ulong kth) const {
+    if (kth >= zero_bits()) return -1ul;
     const auto& offset_bits = RRRTable::offset_bits[block_len];
-    u64 l = 0, h = nsamples;
+    ulong l = 0, h = nsamples;
     while (l < h) {
-      u64 m = l+(h-l)/2, idx = m*sample_len*block_len;
+      ulong m = l+(h-l)/2, idx = m*sample_len*block_len;
       if (idx - rank_samples.block(rsample_bits, m) <= kth)
         l = m+1;
       else
         h = m;
     }
 
-    u64 s = l-1,
-        b = sample_len*s,
-        r = block_len*b - rank_samples.block(rsample_bits, s),
-        o = offset_samples.block(osample_bits, s),
-        k;
+    ulong s = l-1,
+          b = sample_len*s,
+          r = block_len*b - rank_samples.block(rsample_bits, s),
+          o = offset_samples.block(osample_bits, s),
+          k;
     for (; ; b++) {
       k = klasses.block(klass_bits, b);
       if (r+block_len-k > kth) break;
@@ -803,26 +797,26 @@ public:
     }
 
     o = offsets.get_bits(o, offset_bits[k]);
-    return block_len*b + select_in_u64(~ offset2block(k, o), kth-r);
+    return block_len*b + select_in_ulong(~ offset2block(k, o), kth-r);
   }
 
-  u64 select1(u64 kth) const {
-    if (kth >= rank_sum) return -1ull;
+  ulong select1(ulong kth) const {
+    if (kth >= rank_sum) return -1ul;
     const auto& offset_bits = RRRTable::offset_bits[block_len];
-    u64 l = 0, h = nsamples;
+    ulong l = 0, h = nsamples;
     while (l < h) {
-      u64 m = l+(h-l)/2;
+      ulong m = l+(h-l)/2;
       if (rank_samples.block(rsample_bits, m) <= kth)
         l = m+1;
       else
         h = m;
     }
 
-    u64 s = l-1,
-        b = sample_len*s,
-        r = rank_samples.block(rsample_bits, s),
-        o = offset_samples.block(osample_bits, s),
-        k;
+    ulong s = l-1,
+          b = sample_len*s,
+          r = rank_samples.block(rsample_bits, s),
+          o = offset_samples.block(osample_bits, s),
+          k;
     for (; ; b++) {
       k = klasses.block(klass_bits, b);
       if (r+k > kth) break;
@@ -831,7 +825,7 @@ public:
     }
 
     o = offsets.get_bits(o, offset_bits[k]);
-    return block_len*b + select_in_u64(offset2block(k, o), kth-r);
+    return block_len*b + select_in_ulong(offset2block(k, o), kth-r);
   }
 
   template<class Archive>
@@ -854,16 +848,16 @@ public:
 class EliasFanoBuilder
 {
 public:
-  u64 n, bound, l, num = 0, pos = 0;
+  ulong n, bound, l, num = 0, pos = 0;
   BitSet lows, highs;
 
-  EliasFanoBuilder(u64 n, u64 bound) : EliasFanoBuilder(n, bound, n && clog2(bound/n)) {}
+  EliasFanoBuilder(ulong n, ulong bound) : EliasFanoBuilder(n, bound, n && clog2(bound/n)) {}
 
-  EliasFanoBuilder(u64 n, u64 bound, u64 l) : n(n), bound(bound), l(l), lows(l*n), highs((bound>>l)+n+1) {}
+  EliasFanoBuilder(ulong n, ulong bound, ulong l) : n(n), bound(bound), l(l), lows(l*n), highs((bound>>l)+n+1) {}
 
-  void push(u64 x) {
+  void push(ulong x) {
     if (l) {
-      lows.set_bits(pos, l, x & (1ull<<l)-1);
+      lows.set_bits(pos, l, x & (1ul<<l)-1);
       pos += l;
     }
     highs.set((x>>l) + num++);
@@ -873,7 +867,7 @@ public:
 class EliasFano
 {
 public:
-  u64 n, bound, l;
+  ulong n, bound, l;
   BitSet lows;
   RRR highs;
 public:
@@ -885,25 +879,25 @@ public:
     highs.init((bound>>l)+n+1, 0, 0, b.highs);
   }
 
-  u64 operator[](u64 idx) const {
-    u64 ret = highs.select1(idx) - idx << l;
+  ulong operator[](ulong idx) const {
+    ulong ret = highs.select1(idx) - idx << l;
     if (l)
       ret |= lows.get_bits(l*idx, l);
     return ret;
   }
 
-  u64 rank(u64 x) const {
+  ulong rank(ulong x) const {
     if (x > bound) return n;
-    u64 hi = x >> l, lo = x & (1ull<<l)-1;
-    u64 i = highs.select0(hi),
-        r = i - hi; // number of elements in highs <= hi
+    ulong hi = x >> l, lo = x & (1ul<<l)-1;
+    ulong i = highs.select0(hi),
+          r = i - hi; // number of elements in highs <= hi
     while (i && highs[i-1] && (l ? lows.get_bits((r-1)*l, l) : 0) >= lo)
       i--, r--;
     return r;
   }
 
-  bool exist(u64 x) const {
-    u64 r = rank(x);
+  bool exist(ulong x) const {
+    ulong r = rank(x);
     return r < n && operator[](r) == x;
   }
 
@@ -917,23 +911,22 @@ public:
 
 class WaveletMatrix
 {
-  u64 n;
+  ulong n;
   RRR rrr[LOGAB];
 public:
   WaveletMatrix() {}
-
   ~WaveletMatrix() {}
 
-  void init(u64 n, u8 *text, u8 *tmp) {
+  void init(ulong n, u8 *text, u8 *tmp) {
     this->n = n;
     BitSet bs(n);
     REP(d, LOGAB) {
-      u64 bit = LOGAB-1-d;
+      ulong bit = LOGAB-1-d;
       REP(i, n)
         bs.set(i, text[i] >> bit & 1);
       rrr[d].init(n, 0, 0, bs);
       if (d < LOGAB-1) {
-        u64 j = 0;
+        ulong j = 0;
         REP(i, n)
           if (! (text[i] >> bit & 1))
             tmp[j++] = text[i];
@@ -945,39 +938,36 @@ public:
     }
   }
 
-  u64 operator[](u64 i) const { return at(i); }
-  u64 at(u64 i) const {
+  ulong operator[](ulong i) const { return at(i); }
+  ulong at(ulong i) const {
     return at(0, 0, AB, i);
   }
-  u64 at(u64 d, u64 l, u64 h, u64 i) const {
+  ulong at(ulong d, ulong l, ulong h, ulong i) const {
     if (h-l == 1) return l;
-    u64 m = l+h >> 1;
-    u64 z = rrr[d].zero_bits();
+    ulong m = l+h >> 1, z = rrr[d].zero_bits();
     return ! rrr[d][i]
       ? at(d+1, l, m, rrr[d].rank0(i))
       : at(d+1, m, h, z+rrr[d].rank1(i));
   }
 
   // number of occurrences of symbol `x` in [0,i)
-  u64 rank(u64 x, u64 i) const {
+  ulong rank(ulong x, ulong i) const {
     return rank(0, 0, AB, x, i, 0);
   }
-  u64 rank(u64 d, u64 l, u64 h, u64 x, u64 i, u64 p) const {
+  ulong rank(ulong d, ulong l, ulong h, ulong x, ulong i, ulong p) const {
     if (h-l == 1) return i-p;
-    u64 m = l+h >> 1;
-    u64 z = rrr[d].zero_bits();
+    ulong m = l+h >> 1, z = rrr[d].zero_bits();
     return x < m
       ? rank(d+1, l, m, x, rrr[d].rank0(i), rrr[d].rank0(p))
       : rank(d+1, m, h, x, z+rrr[d].rank1(i), z+rrr[d].rank1(p));
   }
   // position of `k`-th occurrence of symbol `x`
-  u64 select(u64 x, u64 k) const {
+  ulong select(ulong x, ulong k) const {
     return select(0, 0, AB, x, k, 0);
   }
-  u64 select(u64 d, u64 l, u64 h, u64 x, u64 k, u64 p) const {
+  ulong select(ulong d, ulong l, ulong h, ulong x, ulong k, ulong p) const {
     if (l == h-1) return p+k;
-    u64 m = l+h >> 1;
-    u64 z = rrr[d].zero_bits();
+    ulong m = l+h >> 1, z = rrr[d].zero_bits();
     return x < m
       ? rrr[d].select0(select(d+1, l, m, x, k, rrr[d].rank0(p)))
       : rrr[d].select1(select(d+1, m, h, x, k, z+rrr[d].rank1(p)) - z);
@@ -995,34 +985,34 @@ public:
 
 class FMIndex
 {
-  u64 n_, samplerate_, initial_;
-  u64 cnt_lt_[AB+1];
+  ulong n_, samplerate_, initial_;
+  ulong cnt_lt_[AB+1];
   EliasFano sampled_ef_;
   SArray<u32> ssa_;
   WaveletMatrix bwt_wm_;
 public:
-  void init(u64 n, const u8 *text, u64 samplerate) {
+  void init(ulong n, const u8 *text, ulong samplerate) {
     samplerate_ = samplerate;
     n_ = n;
 
-    u64 cnt = 0;
+    ulong cnt = 0;
     fill_n(cnt_lt_, AB, 0);
     REP(i, n)
       cnt_lt_[text[i]]++;
     REP(i, AB) {
-      u64 t = cnt_lt_[i];
+      ulong t = cnt_lt_[i];
       cnt_lt_[i] = cnt;
       cnt += t;
     }
     cnt_lt_[AB] = cnt;
 
     int *sa = new int[n];
-    int *tmp = new int[max(n, u64(AB))];
-    u64 sampled_n = (n-1+samplerate)/samplerate;
+    int *tmp = new int[max(n, ulong(AB))];
+    ulong sampled_n = (n-1+samplerate)/samplerate;
     EliasFanoBuilder efb(sampled_n, n ? n-1 : 0);
     ssa_.init(sampled_n);
 
-    u64 nn = 0;
+    ulong nn = 0;
     KoAluru::main(text, sa, tmp, n, AB);
     REP(i, n)
       if (sa[i] % samplerate == 0) {
@@ -1049,11 +1039,11 @@ public:
     delete[] sa;
   }
   // backward search: count occurrences in rotated string
-  pair<u64, u64> get_range(u64 m, const u8 *pattern) const {
+  pair<ulong, ulong> get_range(ulong m, const u8 *pattern) const {
     if (! m)
       return {0, n_};
     u8 c = pattern[m-1];
-    u64 i = m-1, l = cnt_lt_[c], h = cnt_lt_[c+1];
+    ulong i = m-1, l = cnt_lt_[c], h = cnt_lt_[c+1];
     // [l, h) denotes rows [l+1,h+1) of BWT matrix of text+'$'
     // row 'i' of the first column of BWT matrix is mapped to row i+(i<initial_) of the last column
     while (l < h && i) {
@@ -1064,30 +1054,30 @@ public:
     return {l, h};
   }
   // m > 0
-  u64 count(u64 m, const u8 *pattern) const {
+  ulong count(ulong m, const u8 *pattern) const {
     if (! m) return n_;
     auto x = get_range(m, pattern);
     return x.second-x.first;
   }
 
-  u64 calc_sa(u64 rank) const {
-    u64 d = 0, i = rank;
+  ulong calc_sa(ulong rank) const {
+    ulong d = 0, i = rank;
     while (! sampled_ef_.exist(i)) {
-      u64 c = bwt_wm_[i + (i < initial_)];
+      ulong c = bwt_wm_[i + (i < initial_)];
       i = cnt_lt_[c] + bwt_wm_.rank(c, i + (i < initial_));
       d++;
     }
     return ssa_[sampled_ef_.rank(i)] + d;
   }
 
-  u64 locate(u64 m, const u8 *pattern, bool autocomplete, u64 limit, u64 &skip, vector<u64> &res) const {
-    u64 l, h, total;
+  ulong locate(ulong m, const u8 *pattern, bool autocomplete, ulong limit, ulong &skip, vector<ulong> &res) const {
+    ulong l, h, total;
     tie(l, h) = get_range(m, pattern);
     total = h-l;
-    u64 delta = min(h-l, skip);
+    ulong delta = min(h-l, skip);
     l += delta;
     skip -= delta;
-    u64 step = autocomplete ? max((h-l)/limit, u64(1)) : 1;
+    ulong step = autocomplete ? max((h-l)/limit, ulong(1)) : 1;
     for (; l < h && res.size() < limit; l += step)
       res.push_back(calc_sa(l));
     return total;
@@ -1109,9 +1099,9 @@ public:
 // http://stackoverflow.com/questions/257288/is-it-possible-to-write-a-c-template-to-check-for-a-functions-existence
 struct Serializer
 {
-  FILE *fh_;
+  FILE *fh;
 
-  Serializer(FILE *fh) : fh_(fh) {}
+  Serializer(FILE *fh) : fh(fh) {}
 
   template<class T>
   auto serialize_imp(T &x, int) -> decltype(x.serialize(*this), void()) {
@@ -1120,7 +1110,7 @@ struct Serializer
 
   template<class T>
   void serialize_imp(T &x, long) {
-    fwrite(&x, sizeof x, 1, fh_);
+    fwrite(&x, sizeof x, 1, fh);
   }
 
   template<class T>
@@ -1129,14 +1119,10 @@ struct Serializer
     return *this;
   }
 
-  Serializer& operator&(u64 &x) {
-    // u64 scalars are serialized as u32 to save space
-    fwrite(&x, sizeof(u32), 1, fh_);
+  Serializer& operator&(ulong &x) {
+    // for 64-bits: serialized as int to save space
+    fwrite(&x, sizeof(int), 1, fh);
     return *this;
-  }
-
-  void uint64(u64 &x) {
-    fwrite(&x, sizeof(u64), 1, fh_);
   }
 
   template<class S, class T>
@@ -1148,27 +1134,27 @@ struct Serializer
   }
 
   template<class S>
-  void array(S n, u64 *a) {
+  void array(S n, ulong *a) {
     operator&(n);
-    align(alignof(u64));
+    align(alignof(ulong));
     REP(i, n)
-      uint64(a[i]);
+      fwrite(&a[i], sizeof(ulong), 1, fh);
   }
 
   void align(size_t n) {
-    off_t o = ftello(fh_);
+    off_t o = ftello(fh);
     if (o == -1)
       err_exit(EX_IOERR, "ftello");
-    if (o%n && fseek(fh_, o+n-o%n, SEEK_SET))
+    if (o%n && fseek(fh, o+n-o%n, SEEK_SET))
       err_exit(EX_IOERR, "fseek");
   }
 };
 
 struct Deserializer
 {
-  void *a_;
+  void *a;
 
-  Deserializer(void *a) : a_(a) {}
+  Deserializer(void *a) : a(a) {}
 
   template<class T>
   Deserializer &operator&(T &x) {
@@ -1176,10 +1162,10 @@ struct Deserializer
     return *this;
   }
 
-  Deserializer& operator&(u64 &x) {
+  Deserializer& operator&(ulong &x) {
     x = 0;
-    memcpy(&x, a_, sizeof(u32));
-    a_ = (u32 *)a_ + 1;
+    memcpy(&x, a, sizeof(int));
+    a = (int *)a + 1;
     return *this;
   }
 
@@ -1202,36 +1188,18 @@ struct Deserializer
   // fallback
   template<class T>
   void deserialize_imp1(T &x, long) {
-    memcpy(&x, a_, sizeof(T));
-    a_ = (T *)a_ + 1;
-  }
-
-  void uint64(u64 &x) {
-    deserialize_imp1(x, 0);
-  }
-
-  template<class S, class T>
-  void array(S n, T *a) {
-    operator&(n);
-    REP(i, n)
-      operator&(a[i]);
-  }
-
-  template<class S>
-  void array(S n, u64 *a) {
-    operator&(n);
-    REP(i, n)
-      uint64(a[i]);
+    memcpy(&x, a, sizeof(T));
+    a = (T *)a + 1;
   }
 
   void align(size_t n) {
-    auto o = (uintptr_t)a_ % n;
+    auto o = (uintptr_t)a % n;
     if (o)
-      a_ = (void*)((uintptr_t)a_+o);
+      a = (void*)((uintptr_t)a+o);
   }
 
   void skip(size_t n) {
-    a_ = (void*)((uintptr_t)a_+n);
+    a = (void*)((uintptr_t)a+n);
   }
 };
 
@@ -1241,29 +1209,25 @@ void print_help(FILE *fh)
   fputs(
         "\n"
         "Options:\n"
-        "  index mode:\n"
         "  --autocomplete-length L\n"
         "  --autocomplete-limit C\n"
+        "  -c, --request-count       max number of requests (default: -1)\n"
         "  --fmindex-sample-rate R   sample rate of suffix array (for rank -> pos) used in FM index\n"
+        "  -i, --indexer-limit       max number of concurrent indexing tasks\n"
+        "  -l, --search-limit        max number of results\n"
         "  --rrr-sample-rate R       R blocks are grouped to a superblock\n"
         "  -o, --oneshot             run only once (no inotify)\n"
-        "\n"
-        "  server mode:\n"
-        "  -c, --request-count       max number of requests (default: -1)\n"
-        "  -l, --search-limit        max number of results\n"
-        "\n"
-        "  others:\n"
         "  -r, --recursive           recursive\n"
         "  -s, --data-suffix         data file suffix. (default: .ap)\n"
         "  -S, --index-suffix        index file suffix. (default: .fm)\n"
         "  -h, --help                display this help and exit\n"
         "\n"
         "Examples:\n"
-        "  zsh0: ./indexer -o -i /tmp/ray # build index oneshot and run server\n"
-        "  zsh0: ./indexer -i /tmp/ray # build index and use inotify to watch changes within /tmp/ray, creating indices upon CLOSE_WRITE after CREATE/MODIFY, and MOVED_TO, removing indices upon DELETE and MOVED_FROM\n"
+        "  zsh0: ./indexer -o /tmp/ray # build index oneshot and run server\n"
+        "  zsh0: ./indexer /tmp/ray # build index and watch changes within /tmp/ray, creating indices upon CLOSE_WRITE after CREATE/MODIFY, and MOVED_TO, removing indices upon DELETE and MOVED_FROM\n"
         "  zsh1: print -rn -- $'\\0\\0\\0haystack' | socat -t 60 - /tmp/search.sock # autocomplete\n"
-        "  zsh1: print -rn -- $'3\\0\\0\\0haystack' | socat -t 60 - /tmp/search.sock # search, offset=3\n"
-        "  zsh1: print -rn -- $'5\\0a\\0b\\0ha\\0stack\\0' | socat -t 60 - /tmp/search.sock # search filenames F satisfying (\"a\" <= F <= \"b\"), offset=5. \\-escape is allowed in pattern\n"
+        "  zsh1: print -rn -- $'3\\0\\0\\0haystack' | socat -t 60 - /tmp/search.sock # search, skip first 3 matches\n"
+        "  zsh1: print -rn -- $'5\\0a\\0b\\0ha\\0stack\\0' | socat -t 60 - /tmp/search.sock # search filenames F satisfying (\"a\" <= F <= \"b\"), skip first 5. \\-escape is allowed in pattern\n"
         , fh);
   exit(fh == stdout ? 0 : EX_USAGE);
 }
@@ -1468,7 +1432,7 @@ namespace Server
     }
     wd2dir[wd] = dir;
     dir2wd[dir] = wd;
-    log_action("inotify_add_watch '%s'\n", dir.c_str());
+    log_action("inotify_add_watch '%s'", dir.c_str());
     return wd;
   }
 
@@ -1480,12 +1444,12 @@ namespace Server
   void rm_data(const string& data_path) {
     string index_path = data_to_index(data_path);
     if (! unlink(index_path.c_str()))
-      log_action("unlinked %s\n", index_path.c_str());
+      log_action("unlinked %s", index_path.c_str());
     else if (errno != ENOENT)
       err_msg("failed to unlink %s", index_path.c_str());
     if (loaded.find(data_path)) {
       loaded.erase(data_path);
-      log_action("unloaded index of %s\n", data_path.c_str());
+      log_action("unloaded index of %s", data_path.c_str());
     }
   }
 
@@ -1514,9 +1478,9 @@ namespace Server
       else if (nread == 0)
        ;
       else if (nread < sizeof(off_t) || memcmp(buf, MAGIC_GOOD, sizeof(off_t)))
-        log_status("index file %s: bad magic, rebuilding\n", index_path.c_str());
+        log_status("index file %s: bad magic, rebuilding", index_path.c_str());
       else if (nread < 2*sizeof(off_t) || buf[1] != data_size)
-        log_status("index file %s: mismatching length of data file, rebuilding\n", index_path.c_str());
+        log_status("index file %s: mismatching length of data file, rebuilding", index_path.c_str());
       else if ((index_size = lseek(index_fd, 0, SEEK_END)) < 2*sizeof(off_t))
         ;
       else
@@ -1524,7 +1488,7 @@ namespace Server
     }
     if (loaded.find(*data_path)) {
       loaded.erase(*data_path);
-      log_action("rebuilding index of %s\n", data_path->c_str());
+      log_action("rebuilding index of %s", data_path->c_str());
     }
     {
       StopWatch sw;
@@ -1551,7 +1515,7 @@ namespace Server
         err_exit(EX_IOERR, "fwrite");
       if (fflush(fh) == EOF)
         err_exit(EX_IOERR, "fflush");
-      log_action("created index of %s. data: %ld, index: %ld, used %.3lf s\n", data_path->c_str(), data_size, index_size, sw.elapsed());
+      log_action("created index of %s. data: %ld, index: %ld, used %.3lf s", data_path->c_str(), data_size, index_size, sw.elapsed());
     }
 load:
     {
@@ -1572,7 +1536,7 @@ load:
       loaded.insert(*data_path, entry);
       pthread_cond_signal(&manager_cond);
       pthread_mutex_unlock(&mutex);
-      log_action("loaded index of %s\n", data_path->c_str());
+      log_action("loaded index of %s", data_path->c_str());
     }
     goto success;
 quit:
@@ -1587,7 +1551,7 @@ quit:
 success:
     delete data_path;
     if (errno)
-      err_msg("failed to index %s", data_path->c_str());
+      err_msg("failed to index '%s'", data_path->c_str());
     pthread_mutex_lock(&mutex);
     pending--;
     pending_indexers--;
@@ -1640,9 +1604,9 @@ quit:;
         string path = to_path(dir, ev->name);
         if (ev->mask & (IN_CREATE | IN_MOVED_TO)) {
           if (ev->mask & IN_CREATE)
-            log_event("CREATE %s\n", path.c_str());
+            log_event("CREATE %s", path.c_str());
           else
-            log_event("MOVED_TO %s\n", path.c_str());
+            log_event("MOVED_TO %s", path.c_str());
 
           if (ev->mask & IN_ISDIR)
             opt_recursive && inotify_add_dir(path.c_str());
@@ -1657,15 +1621,15 @@ quit:;
           }
         } else if (ev->mask & (IN_DELETE | IN_MOVED_FROM)) {
           if (ev->mask & IN_DELETE)
-            log_event("DELETE %s\n", path.c_str());
+            log_event("DELETE %s", path.c_str());
           else
-            log_event("MOVED_FROM %s\n", path.c_str());
+            log_event("MOVED_FROM %s", path.c_str());
           if (! (ev->mask & IN_ISDIR)) {
             modified.erase(path);
             if (data) rm_data(path);
           }
         } else if (ev->mask & IN_IGNORED) {
-          log_event("IGNORED %s\n", dir);
+          log_event("IGNORED %s", dir);
           if (wd2dir.count(ev->wd)) {
             dir2wd.erase(wd2dir[ev->wd]);
             wd2dir.erase(ev->wd);
@@ -1676,7 +1640,7 @@ quit:;
           err_exit(EX_OSFILE, "'%s' has been moved", wd2dir[ev->wd].c_str());
         else if (ev->mask & IN_CLOSE_WRITE) {
           if (modified.count(path)) {
-            log_event("CLOSE_WRITE after MODIFY %s\n", path.c_str());
+            log_event("CLOSE_WRITE after MODIFY %s", path.c_str());
             modified.erase(path);
             if (data) add_data(path);
           }
@@ -1720,7 +1684,12 @@ quit:;
     if (++p >= buf+nread) goto quit;
     file_end = p;
     for (; p < buf+nread && *p; p++);
-    if (++p >= buf+nread) goto quit;
+    ulong len;
+    if (p+1 < buf+nread) {
+      p++;
+      len = buf+nread-p;
+    } else
+      len = 0;
 
     {
       pthread_mutex_lock(&mutex);
@@ -1728,50 +1697,48 @@ quit:;
       if (root) root->refcnt++;
       pthread_mutex_unlock(&mutex);
 
-      u64 len = buf+nread-p, total = 0, t;
+      ulong total = 0, t;
       // autocomplete
       if (! buf[0]) {
-        typedef tuple<string, u64, string> cand_type;
-        u64 skip = 0;
-        vector<u64> res;
+        typedef tuple<string, ulong, string> cand_type;
+        ulong skip = 0;
+        vector<ulong> res;
         vector<cand_type> candidates;
         for (auto& it: loaded.backward(root)) {
           auto entry = it.val;
-          if (entry->data_size > 0) {
-            auto old_size = res.size();
-            string pattern = unescape(len, p);
-            entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), true, autocomplete_limit, skip, res);
-            FOR(i, old_size, res.size())
-              candidates.emplace_back(it.key, res[i], string((char*)entry->data_mmap+res[i], (char*)entry->data_mmap+min(u64(entry->data_size), res[i]+len+autocomplete_length)));
-            if (res.size() >= autocomplete_limit) break;
-          }
+          auto old_size = res.size();
+          string pattern = unescape(len, p);
+          entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), true, autocomplete_limit, skip, res);
+          FOR(i, old_size, res.size())
+            candidates.emplace_back(it.key, res[i], string((char*)entry->data_mmap+res[i], (char*)entry->data_mmap+min(ulong(entry->data_size), res[i]+len+autocomplete_length)));
+          if (res.size() >= autocomplete_limit) break;
         }
         sort(candidates.begin(), candidates.end());
         candidates.erase(unique(candidates.begin(), candidates.end(), [](const cand_type &x, const cand_type &y) {
                                 return get<2>(x) == get<2>(y);
                                 }), candidates.end());
         for (auto& cand: candidates)
-          if (dprintf(connfd, "%s\t%u\t%s\n", get<0>(cand).c_str(), get<1>(cand), escape(get<2>(cand)).c_str()) < 0)
+          if (dprintf(connfd, "%s\t%lu\t%s\n", get<0>(cand).c_str(), get<1>(cand), escape(get<2>(cand)).c_str()) < 0)
             goto quit;
       } else {
         char *end;
         errno = 0;
-        u64 skip = strtoull(buf, &end, 0);
+        ulong skip = strtoul(buf, &end, 0);
         if (! *end && ! errno) {
-          vector<u64> res;
+          vector<ulong> res;
           for (auto& it: loaded.backward(root)) {
             auto entry = it.val;
-            if ((! *file_begin || string(file_begin) <= it.key) && (! *file_end || it.key <= string(file_end)) && entry->data_size > 0) {
+            if ((! *file_begin || string(file_begin) <= it.key) && (! *file_end || it.key <= string(file_end))) {
               auto old_size = res.size();
               string pattern = unescape(len, p);
               total += entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), false, search_limit, skip, res);
               FOR(i, old_size, res.size())
-                if (dprintf(connfd, "%s\t%" PRIu64 "\t%" PRIu64 "\n", it.key.c_str(), res[i], len) < 0)
+                if (dprintf(connfd, "%s\t%lu\t%lu\n", it.key.c_str(), res[i], len) < 0)
                   goto quit;
               if (res.size() >= autocomplete_limit) break;
             }
           }
-          dprintf(connfd, "%" PRIu64 "\n", total);
+          dprintf(connfd, "%lu\n", total);
         }
       }
 
@@ -1832,7 +1799,7 @@ quit:
     if (opt_inotify) {
       if ((inotify_fd = inotify_init()) < 0)
         err_exit(EX_OSERR, "inotify_init");
-      log_status("start inotify\n");
+      log_status("start inotify");
     }
     for (auto dir: data_dir)
       walk(0, AT_FDCWD, dir, dir);
@@ -1841,32 +1808,21 @@ quit:
     pthread_mutex_unlock(&mutex);
 
     while (request_count) {
-      struct pollfd fds[3];
-      fds[0].fd = log_pipe[0];
+      struct pollfd fds[2];
+      fds[0].fd = sockfd;
       fds[0].events = POLLIN;
-      fds[1].fd = sockfd;
-      fds[1].events = POLLIN;
-      int nfds = 2;
+      int nfds = 1;
       if (inotify_fd >= 0) {
-        fds[2].fd = inotify_fd;
-        fds[2].events = POLLIN;
-        nfds = 3;
+        fds[1].fd = inotify_fd;
+        fds[1].events = POLLIN;
+        nfds = 2;
       }
       int ready = poll(fds, nfds, -1);
       if (ready < 0) {
         if (errno == EINTR) continue;
         err_exit(EX_OSERR, "poll");
       }
-      if (fds[0].revents & POLLIN) { // log pipe
-        char buf[BUF_SIZE];
-        ssize_t nread = read(log_pipe[0], buf, sizeof buf);
-        if (nread < 0) {
-          if (errno != EINTR)
-            err_exit(EX_IOERR, "read");
-        } else
-          write(STDOUT_FILENO, buf, nread);
-      }
-      if (fds[1].revents & POLLIN) { // socket
+      if (fds[0].revents & POLLIN) { // socket
         int connfd = accept(sockfd, NULL, NULL);
         if (connfd < 0) err_exit(EX_OSERR, "accept");
         pthread_mutex_lock(&mutex);
@@ -1874,7 +1830,7 @@ quit:
         pthread_mutex_unlock(&mutex);
         if (request_count > 0) request_count--;
       }
-      if (2 < nfds && fds[2].revents & POLLIN) // inotifyfd
+      if (1 < nfds && fds[1].revents & POLLIN) // inotifyfd
         process_inotify();
     }
     if (inotify_fd >= 0)
@@ -1903,6 +1859,7 @@ int main(int argc, char *argv[])
     {"data-suffix",         required_argument, 0,   's'},
     {"fmindex-sample-rate", required_argument, 0,   'f'},
     {"help",                no_argument,       0,   'h'},
+    {"indexer-limit",       required_argument, 0,   'i'},
     {"index-suffix",        required_argument, 0,   'S'},
     {"oneshot",             no_argument,       0,   'o'},
     {"recursive",           no_argument,       0,   'r'},
@@ -1912,7 +1869,7 @@ int main(int argc, char *argv[])
     {0,                     0,                 0,   0},
   };
 
-  while ((opt = getopt_long(argc, argv, "-c:f:hl:op:rs:S:", long_options, NULL)) != -1) {
+  while ((opt = getopt_long(argc, argv, "-c:f:hi:l:op:rs:S:", long_options, NULL)) != -1) {
     switch (opt) {
     case 1: {
       struct stat statbuf;
@@ -1979,8 +1936,6 @@ int main(int argc, char *argv[])
   }
 
   RRRTable::init();
-  if (pipe(log_pipe) < 0)
-    err_exit(EX_OSERR, "pipe");
 
 #define D(name) printf("%s: %ld\n", #name, name)
   D(autocomplete_length);
@@ -1992,6 +1947,4 @@ int main(int argc, char *argv[])
 #undef D
 
   Server::run();
-  close(log_pipe[0]);
-  close(log_pipe[1]);
 }
