@@ -1093,16 +1093,8 @@ public:
     l += delta;
     skip -= delta;
     u64 step = autocomplete ? max((h-l)/limit, u64(1)) : 1;
-    for (; l < h && res.size() < limit; l += step) {
-      u64 d = 0, i = l;
-      while (! sampled_ef_.exist(i)) {
-        int c = bwt_wm_[i + (i < initial_)];
-        i = cnt_lt_[c] + bwt_wm_.rank(c, i + (i < initial_));
-        d++;
-      }
-      u64 pos = ssa_[sampled_ef_.rank(i)] + d;
-      res.push_back(pos);
-    }
+    for (; l < h && res.size() < limit; l += step)
+      res.push_back(calc_sa(l));
     return total;
   }
 
@@ -1266,7 +1258,6 @@ void print_help(FILE *fh)
         "  -l, --search-limit        max number of results\n"
         "\n"
         "  others:\n"
-        "  -i, --index               index mode. (default: server mode)\n"
         "  -r, --recursive           recursive\n"
         "  -s, --data-suffix         data file suffix. (default: .ap)\n"
         "  -S, --index-suffix        index file suffix. (default: .fm)\n"
@@ -1882,6 +1873,7 @@ quit:
     }
     for (auto dir: data_dir)
       walk(0, AT_FDCWD, dir, dir);
+    detached_thread(cleaner, nullptr);
 
     while (request_count) {
       struct pollfd fds[3];
@@ -1935,8 +1927,6 @@ quit:
 
 int main(int argc, char *argv[])
 {
-  bool is_index_mode = false;
-
   int opt;
   static struct option long_options[] = {
     {"autocomplete-length", required_argument, 0,   2},
@@ -1944,7 +1934,6 @@ int main(int argc, char *argv[])
     {"data-suffix",         required_argument, 0,   's'},
     {"fmindex-sample-rate", required_argument, 0,   'f'},
     {"help",                no_argument,       0,   'h'},
-    {"index",               no_argument,       0,   'i'},
     {"index-suffix",        required_argument, 0,   'S'},
     {"oneshot",             no_argument,       0,   'o'},
     {"recursive",           no_argument,       0,   'r'},
@@ -1954,7 +1943,7 @@ int main(int argc, char *argv[])
     {0,                     0,                 0,   0},
   };
 
-  while ((opt = getopt_long(argc, argv, "-c:f:hil:op:rs:S:", long_options, NULL)) != -1) {
+  while ((opt = getopt_long(argc, argv, "-c:f:hl:op:rs:S:", long_options, NULL)) != -1) {
     switch (opt) {
     case 1: {
       struct stat statbuf;
@@ -1985,9 +1974,6 @@ int main(int argc, char *argv[])
       break;
     case 'h':
       print_help(stdout);
-      break;
-    case 'i':
-      is_index_mode = true;
       break;
     case 'l':
       search_limit = get_long(optarg);
