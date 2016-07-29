@@ -78,12 +78,13 @@ long autocomplete_limit = 20;
 long autocomplete_length = 20;
 long search_limit = 20;
 long fmindex_sample_rate = 32;
+long indexer_limit = 0;
 long rrr_sample_rate = 8;
 double request_timeout = 1;
 long request_count = -1;
 bool opt_inotify = true;
 bool opt_recursive = false;
-atomic<int> ongoing(0);
+atomic<int> ongoing(0), ongoing_indexers;
 
 ///// log
 int log_pipe[2];
@@ -625,6 +626,7 @@ namespace KoAluru
 namespace RRRTable
 {
   static const u64 SIZE = 20;
+  static pthread_mutex_t rrr_mutex = PTHREAD_MUTEX_INITIALIZER;
   vector<vector<u64>> binom;
   vector<vector<u32>> offset_bits, combinations(SIZE), klass_offset(SIZE), offset_pos(SIZE);
 
@@ -650,6 +652,7 @@ namespace RRRTable
   }
 
   void raise(long size) {
+    pthread_mutex_lock(&rrr_mutex);
     FOR(i, binom.size(), size) {
       binom.emplace_back(i+1);
       binom[i][0] = binom[i][i] = 1;
@@ -659,6 +662,7 @@ namespace RRRTable
       REP(j, i+1)
         offset_bits[i][j] = clog2(binom[i][j]);
     }
+    pthread_mutex_unlock(&rrr_mutex);
   }
 };
 
@@ -1445,10 +1449,12 @@ namespace Server
   map<int, string> wd2dir;
   map<string, int> dir2wd;
   set<string> modified;
-  RefCountTreap<string, shared_ptr<Entry>> loaded;
+
   pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-  pthread_cond_t cleaner_cond = PTHREAD_COND_INITIALIZER;
-  bool cleaner_quit = false;
+  pthread_cond_t manager_cond = PTHREAD_COND_INITIALIZER;
+  bool manager_quit = false;
+  vector<string> indexer_tasks;
+  RefCountTreap<string, shared_ptr<Entry>> loaded;
 
   void detached_thread(void* (*start_routine)(void*), void* data) {
     ongoing++;
@@ -1474,6 +1480,10 @@ namespace Server
     return wd;
   }
 
+  void add_data(const string& data_path) {
+    indexer_tasks.push_back(data_path);
+  }
+
   void rm_data(const string& data_path) {
     string index_path = data_to_index(data_path);
     if (! unlink(index_path.c_str()))
@@ -1486,7 +1496,7 @@ namespace Server
     }
   }
 
-  void* add_data_worker(void* data_path_) {
+  void* indexer(void* data_path_) {
     string* data_path = (string*)data_path_;
     string index_path = data_to_index(*data_path);
     int data_fd = -1, index_fd = -1;
@@ -1564,7 +1574,7 @@ load:
       ar & *entry->fm;
       pthread_mutex_lock(&mutex);
       loaded.insert(*data_path, entry);
-      pthread_cond_signal(&cleaner_cond);
+      pthread_cond_signal(&manager_cond);
       pthread_mutex_unlock(&mutex);
       log_action("loaded index of %s\n", data_path->c_str());
     }
@@ -1583,11 +1593,8 @@ success:
     if (errno)
       err_msg("failed to index %s", data_path->c_str());
     ongoing--;
+    ongoing_indexers--;
     return NULL;
-  }
-
-  void add_data(const string& data_path) {
-    detached_thread(add_data_worker, new string(data_path));
   }
 
   void walk(long depth, long dir_fd, string path, const char* file) {
@@ -1779,18 +1786,23 @@ quit:
     return NULL;
   }
 
-  void* cleaner(void*) {
+  void* manager(void*) {
     for(;;) {
       pthread_mutex_lock(&mutex);
-      while (! cleaner_quit && loaded.roots.empty())
-        pthread_cond_wait(&cleaner_cond, &mutex);
+      while (! manager_quit && loaded.roots.empty() && (indexer_tasks.empty() || ongoing_indexers >= indexer_limit))
+        pthread_cond_wait(&manager_cond, &mutex);
+      while (indexer_tasks.size() && ongoing_indexers < indexer_limit) {
+        ongoing_indexers++;
+        detached_thread(indexer, new string(indexer_tasks.back()));
+        indexer_tasks.pop_back();
+      }
       while (loaded.roots.size()) {
         if (loaded.roots.back())
           loaded.roots.back()->unref();
         loaded.roots.pop_back();
       }
       pthread_mutex_unlock(&mutex);
-      if (cleaner_quit) break;
+      if (manager_quit) break;
     }
     ongoing--;
     return NULL;
@@ -1819,7 +1831,7 @@ quit:
     }
     for (auto dir: data_dir)
       walk(0, AT_FDCWD, dir, dir);
-    //detached_thread(cleaner, nullptr);
+    detached_thread(manager, nullptr);
 
     while (request_count) {
       struct pollfd fds[3];
@@ -1859,8 +1871,8 @@ quit:
     if (inotify_fd >= 0)
       close(inotify_fd);
     close(sockfd);
-    cleaner_quit = true;
-    pthread_cond_signal(&cleaner_cond);
+    manager_quit = true;
+    pthread_cond_signal(&manager_cond);
     // destructors should be called after all readers & writers of RefCountTreap have finished
     while (ongoing.load() > 0)
       usleep(50*1000);
@@ -1921,6 +1933,9 @@ int main(int argc, char *argv[])
     case 'h':
       print_help(stdout);
       break;
+    case 'i':
+      indexer_limit = get_long(optarg);
+      break;
     case 'l':
       search_limit = get_long(optarg);
       break;
@@ -1946,21 +1961,26 @@ int main(int argc, char *argv[])
   }
   if (data_dir.empty())
     print_help(stderr);
-
-#define D(name) printf("%s: %ld\n", #name, name)
+  if (! indexer_limit) {
+    indexer_limit = sysconf(_SC_NPROCESSORS_ONLN);
+    if (indexer_limit < 0)
+      err_exit(EX_OSERR, "sysconf");
+  }
 
   RRRTable::init();
   if (pipe(log_pipe) < 0)
     err_exit(EX_OSERR, "pipe");
 
-  D(fmindex_sample_rate);
-  D(rrr_sample_rate);
+#define D(name) printf("%s: %ld\n", #name, name)
   D(autocomplete_length);
   D(autocomplete_limit);
+  D(fmindex_sample_rate);
+  D(indexer_limit);
+  D(rrr_sample_rate);
   D(search_limit);
+#undef D
+
   Server::run();
   close(log_pipe[0]);
   close(log_pipe[1]);
-
-#undef D
 }
