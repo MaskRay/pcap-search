@@ -60,6 +60,7 @@ typedef unsigned long ulong;
 #define BLUE "\x1b[34m"
 #define MAGENTA "\x1b[35m"
 #define CYAN "\x1b[36m"
+#define BOLD_CYAN "\x1b[1;36m"
 
 const char MAGIC_BAD[] = "BAD MEOW"; // first sizeof(off_t) bytes
 const char MAGIC_GOOD[] = "GOODMEOW"; // first sizeof(off_t) bytes
@@ -79,6 +80,7 @@ long indexer_limit = 0;
 long rrr_sample_rate = 8;
 double request_timeout = 1;
 long request_count = -1;
+bool opt_force_rebuild = false;
 bool opt_inotify = true;
 bool opt_recursive = false;
 
@@ -1209,17 +1211,20 @@ void print_help(FILE *fh)
   fputs(
         "\n"
         "Options:\n"
-        "  --autocomplete-length L\n"
-        "  --autocomplete-limit C\n"
-        "  -c, --request-count       max number of requests (default: -1)\n"
-        "  --fmindex-sample-rate R   sample rate of suffix array (for rank -> pos) used in FM index\n"
-        "  -i, --indexer-limit       max number of concurrent indexing tasks\n"
-        "  -l, --search-limit        max number of results\n"
-        "  --rrr-sample-rate R       R blocks are grouped to a superblock\n"
+        "  --autocomplete-length %ld\n"
+        "  --autocomplete-limit %ld  max number of autocomplete items\n"
+        "  -c, --request-count %ld   max number of requests (default: -1)\n"
+        "  -f, --force-rebuild       ignore exsistent indices\n"
+        "  --fmindex-sample-rate %lf sample rate of suffix array (for rank -> pos) used in FM index\n"
+        "  -i, --indexer-limit %ld   max number of concurrent indexing tasks\n"
+        "  -l, --search-limit %ld    max number of results\n"
+        "  --rrr-sample-rate %ld     R blocks are grouped to a superblock\n"
         "  -o, --oneshot             run only once (no inotify)\n"
+        "  -p, --path %s             path of listening Unix domain socket\n"
         "  -r, --recursive           recursive\n"
-        "  -s, --data-suffix         data file suffix. (default: .ap)\n"
-        "  -S, --index-suffix        index file suffix. (default: .fm)\n"
+        "  -s, --data-suffix %s      data file suffix. (default: .ap)\n"
+        "  -S, --index-suffix %s     index file suffix. (default: .fm)\n"
+        "  -t, --request-timeout %lf clients idle for more than T seconds will be dropped (default: 1)\n"
         "  -h, --help                display this help and exit\n"
         "\n"
         "Examples:\n"
@@ -1227,7 +1232,7 @@ void print_help(FILE *fh)
         "  zsh0: ./indexer /tmp/ray # build index and watch changes within /tmp/ray, creating indices upon CLOSE_WRITE after CREATE/MODIFY, and MOVED_TO, removing indices upon DELETE and MOVED_FROM\n"
         "  zsh1: print -rn -- $'\\0\\0\\0haystack' | socat -t 60 - /tmp/search.sock # autocomplete\n"
         "  zsh1: print -rn -- $'3\\0\\0\\0haystack' | socat -t 60 - /tmp/search.sock # search, skip first 3 matches\n"
-        "  zsh1: print -rn -- $'5\\0a\\0b\\0ha\\0stack\\0' | socat -t 60 - /tmp/search.sock # search filenames F satisfying (\"a\" <= F <= \"b\"), skip first 5. \\-escape is allowed in pattern\n"
+        "  zsh1: print -rn -- $'5\\0a\\0b\\0ha\\0stack\\0\\\\0\\\\1' | socat -t 60 - /tmp/search.sock # search filenames F satisfying (\"a\" <= F <= \"b\"), skip first 5, pattern is \"stack\\0\\0\\1\". \\-escape is allowed\n"
         , fh);
   exit(fh == stdout ? 0 : EX_USAGE);
 }
@@ -1427,12 +1432,12 @@ namespace Server
   int inotify_add_dir(const string& dir) {
     int wd = inotify_add_watch(inotify_fd, dir.c_str(), IN_CLOSE_WRITE | IN_CREATE | IN_DELETE | IN_IGNORED | IN_MODIFY | IN_MOVE | IN_MOVE_SELF);
     if (wd < 0) {
-      err_msg("failed to inotify_add_watch '%s'", dir.c_str());
+      err_msg("failed to inotify_add_watch %s", dir.c_str());
       return wd;
     }
     wd2dir[wd] = dir;
     dir2wd[dir] = wd;
-    log_action("inotify_add_watch '%s'", dir.c_str());
+    log_action("inotify_add_watch %s", dir.c_str());
     return wd;
   }
 
@@ -1483,12 +1488,13 @@ namespace Server
         log_status("index file %s: mismatching length of data file, rebuilding", index_path.c_str());
       else if ((index_size = lseek(index_fd, 0, SEEK_END)) < 2*sizeof(off_t))
         ;
-      else
+      else if (! opt_force_rebuild)
         goto load;
     }
+    // rebuild
     if (loaded.find(*data_path)) {
       loaded.erase(*data_path);
-      log_action("rebuilding index of %s", data_path->c_str());
+      log_action("rebuilding index of '%s", data_path->c_str());
     }
     {
       StopWatch sw;
@@ -1551,7 +1557,7 @@ quit:
 success:
     delete data_path;
     if (errno)
-      err_msg("failed to index '%s'", data_path->c_str());
+      err_msg("failed to index %s", data_path->c_str());
     pthread_mutex_lock(&mutex);
     pending--;
     pending_indexers--;
@@ -1573,7 +1579,7 @@ success:
         inotify_add_dir(path);
       fd = openat(dir_fd, file, O_RDONLY);
       if (fd < 0)
-        err_msg_g("failed to open '%s'", path.c_str());
+        err_msg_g("failed to open %s", path.c_str());
       DIR* dirp = fdopendir(fd);
       if (! dirp)
         err_msg_g("opendir");
@@ -1637,7 +1643,7 @@ quit:;
         } else if (ev->mask & IN_MODIFY) {
           if (data) modified.insert(path);
         } else if (ev->mask & IN_MOVE_SELF)
-          err_exit(EX_OSFILE, "'%s' has been moved", wd2dir[ev->wd].c_str());
+          err_exit(EX_OSFILE, "%s has been moved", wd2dir[ev->wd].c_str());
         else if (ev->mask & IN_CLOSE_WRITE) {
           if (modified.count(path)) {
             log_event("CLOSE_WRITE after MODIFY %s", path.c_str());
@@ -1789,20 +1795,22 @@ quit:
     struct sockaddr_un addr = {};
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, listen_path, sizeof(addr.sun_path)-1);
-    unlink(addr.sun_path);
+    if (! unlink(listen_path))
+      log_action("removed old socket %s", listen_path);
     if (bind(sockfd, (struct sockaddr *)&addr, sizeof addr) < 0)
       err_exit(EX_OSERR, "bind");
     if (listen(sockfd, 1) < 0)
       err_exit(EX_OSERR, "listen");
+    log_status("listening on %s", listen_path);
 
     // load existing
-    if (opt_inotify) {
+    if (opt_inotify)
       if ((inotify_fd = inotify_init()) < 0)
         err_exit(EX_OSERR, "inotify_init");
-      log_status("start inotify");
-    }
     for (auto dir: data_dir)
       walk(0, AT_FDCWD, dir, dir);
+    if (opt_inotify)
+      log_status("start inotify");
     pthread_mutex_lock(&mutex);
     detached_thread(manager, nullptr);
     pthread_mutex_unlock(&mutex);
@@ -1857,19 +1865,21 @@ int main(int argc, char *argv[])
     {"autocomplete-length", required_argument, 0,   2},
     {"autocomplete-limit",  required_argument, 0,   3},
     {"data-suffix",         required_argument, 0,   's'},
-    {"fmindex-sample-rate", required_argument, 0,   'f'},
+    {"fmindex-sample-rate", required_argument, 0,   4},
+    {"force-rebuild",       no_argument,       0,   'f'},
     {"help",                no_argument,       0,   'h'},
     {"indexer-limit",       required_argument, 0,   'i'},
     {"index-suffix",        required_argument, 0,   'S'},
     {"oneshot",             no_argument,       0,   'o'},
+    {"path",                required_argument, 0,   'p'},
     {"recursive",           no_argument,       0,   'r'},
     {"request-count",       required_argument, 0,   'c'},
-    {"request-timeout",     required_argument, 0,   4},
+    {"request-timeout",     required_argument, 0,   't'},
     {"rrr-sample-rate",     required_argument, 0,   5},
     {0,                     0,                 0,   0},
   };
 
-  while ((opt = getopt_long(argc, argv, "-c:f:hi:l:op:rs:S:", long_options, NULL)) != -1) {
+  while ((opt = getopt_long(argc, argv, "-c:fhi:l:op:rs:S:t:", long_options, NULL)) != -1) {
     switch (opt) {
     case 1: {
       struct stat statbuf;
@@ -1887,7 +1897,7 @@ int main(int argc, char *argv[])
       autocomplete_limit = get_long(optarg);
       break;
     case 4:
-      request_timeout = get_double(optarg);
+      fmindex_sample_rate = get_double(optarg);
       break;
     case 5:
       rrr_sample_rate = get_long(optarg);
@@ -1896,7 +1906,7 @@ int main(int argc, char *argv[])
       request_count = get_long(optarg);
       break;
     case 'f':
-      fmindex_sample_rate = get_long(optarg);
+      opt_force_rebuild = true;
       break;
     case 'h':
       print_help(stdout);
@@ -1922,6 +1932,9 @@ int main(int argc, char *argv[])
     case 'S':
       index_suffix = optarg;
       break;
+    case 't':
+      request_timeout = get_double(optarg);
+      break;
     case '?':
       print_help(stderr);
       break;
@@ -1937,14 +1950,33 @@ int main(int argc, char *argv[])
 
   RRRTable::init();
 
-#define D(name) printf("%s: %ld\n", #name, name)
-  D(autocomplete_length);
-  D(autocomplete_limit);
-  D(fmindex_sample_rate);
-  D(indexer_limit);
-  D(rrr_sample_rate);
-  D(search_limit);
-#undef D
+#define B(name) printf("%s: %s\n", #name, name ? "true" : "false")
+#define D(name) printf("%s: %lg\n", #name, name)
+#define I(name) printf("%s: %ld\n", #name, name)
+#define S(name) printf("%s: %s\n", #name, name.c_str())
+  puts(BOLD_CYAN "Data & index files:");
+  B(opt_inotify);
+  B(opt_recursive);
+  S(data_suffix);
+  S(index_suffix);
+  I(indexer_limit);
+  printf("data_dir:");
+  for (auto dir: data_dir)
+    printf(" %s", dir);
+  puts("");
+
+  puts("\nRequests:");
+  I(autocomplete_length);
+  I(autocomplete_limit);
+  I(search_limit);
+  D(request_timeout);
+
+  puts("\nSuccinct data structures:");
+  I(fmindex_sample_rate);
+  I(rrr_sample_rate);
+
+  printf(SGR0);
+  fflush(stdout);
 
   Server::run();
 }
