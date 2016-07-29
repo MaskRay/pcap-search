@@ -1482,6 +1482,7 @@ namespace Server
 
   void add_data(const string& data_path) {
     indexer_tasks.push_back(data_path);
+    pthread_cond_signal(&manager_cond);
   }
 
   void rm_data(const string& data_path) {
@@ -1594,6 +1595,7 @@ success:
       err_msg("failed to index %s", data_path->c_str());
     ongoing--;
     ongoing_indexers--;
+    pthread_cond_signal(&manager_cond);
     return NULL;
   }
 
