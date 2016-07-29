@@ -477,11 +477,8 @@ public:
 
 namespace KoAluru
 {
-  bool *t;
-  int *b;
-
   template<typename T>
-  void bucket(T a[], int n, int k, bool end)
+  void bucket(T a[], int b[], int n, int k, bool end)
   {
     fill_n(b, k, 0);
     REP(i, n) b[a[i]]++;
@@ -495,9 +492,9 @@ namespace KoAluru
   }
 
   template<typename T>
-  void plus_to_minus(T a[], int sa[], int n, int k)
+  void plus_to_minus(T a[], int sa[], int b[], bool t[], int n, int k)
   {
-    bucket(a, n, k, false);
+    bucket(a, b, n, k, false);
     sa[b[a[n-1]]++] = n-1;
     REP(i, n-1) {
       int j = sa[i]-1;
@@ -507,9 +504,9 @@ namespace KoAluru
   }
 
   template<typename T>
-  void minus_to_plus(T a[], int sa[], int n, int k)
+  void minus_to_plus(T a[], int sa[], int b[], bool t[], int n, int k)
   {
-    bucket(a, n, k, true);
+    bucket(a, b, n, k, true);
     ROF(i, 0, n) {
       int j = sa[i]-1;
       if (j >= 0 && t[j])
@@ -518,28 +515,28 @@ namespace KoAluru
   }
 
   template<typename T>
-  void ka(T a[], int sa[], int n, int k)
+  void ka(T a[], int sa[], int b[], bool t[], int n, int k)
   {
     t[n-1] = false;
     ROF(i, 0, n-1)
       t[i] = a[i] < a[i+1] || a[i] == a[i+1] && t[i+1];
     bool minor = 2 * count(t, t+n, false) > n;
 
-    bucket(a, n, k, minor);
+    bucket(a, b, n, k, minor);
     fill_n(sa, n, -1);
     if (minor) {
       REP(i, n)
         if (t[i])
           sa[--b[a[i]]] = i;
-      plus_to_minus(a, sa, n, k);
-      minus_to_plus(a, sa, n, k);
+      plus_to_minus(a, sa, b, t, n, k);
+      minus_to_plus(a, sa, b, t, n, k);
     } else {
       sa[b[a[n-1]]++] = n-1;
       REP(i, n-1)
         if (! t[i])
           sa[b[a[i]]++] = i;
-      minus_to_plus(a, sa, n, k);
-      plus_to_minus(a, sa, n, k);
+      minus_to_plus(a, sa, b, t, n, k);
+      plus_to_minus(a, sa, b, t, n, k);
     }
 
     int last = -1, name = 0, nn = count(t, t+n, minor);
@@ -573,7 +570,7 @@ namespace KoAluru
         pi[nn++] = b[i];
 
     if (name < nn)
-      ka(pi, sa2, nn, name);
+      ka(pi, sa2, b, t, nn, name);
     else
       REP(i, nn)
         sa2[pi[i]] = i;
@@ -582,7 +579,7 @@ namespace KoAluru
       t[i] = a[i] < a[i+1] || a[i] == a[i+1] && t[i+1];
 
     nn = 0;
-    bucket(a, n, k, minor);
+    bucket(a, b, n, k, minor);
     if (minor) {
       REP(i, n)
         if (minor == t[i])
@@ -607,18 +604,17 @@ namespace KoAluru
       }
     }
     if (minor)
-      plus_to_minus(a, sa, n, k);
+      plus_to_minus(a, sa, b, t, n, k);
     else
-      minus_to_plus(a, sa, n, k);
+      minus_to_plus(a, sa, b, t, n, k);
   }
 
   template<typename T>
   void main(T a[], int sa[], int b[], int n, int k)
   {
     if (n > 0) {
-      KoAluru::b = b;
-      t = new bool[n];
-      ka(a, sa, n, k);
+      bool* t = new bool[n];
+      ka(a, sa, b, t, n, k);
       delete[] t;
     }
   }
@@ -1021,7 +1017,7 @@ public:
     int *sa = new int[n];
     int *tmp = new int[max(n, u64(AB))];
     u64 sampled_n = (n-1+samplerate)/samplerate;
-    EliasFanoBuilder efb(sampled_n, n-1);
+    EliasFanoBuilder efb(sampled_n, n ? n-1 : 0);
     ssa_.init(sampled_n);
 
     u64 nn = 0;
@@ -1038,18 +1034,22 @@ public:
     // sizeof(int) >= 2*sizeof(u8)
     u8 *bwt = (u8 *)tmp, *bwt_t = (u8 *)tmp+n;
     initial_ = -1;
-    bwt[0] = text[n-1];
-    REP(i, n)
-      if (! sa[i])
-        initial_ = i+1;
-      else
-        bwt[i + (initial_ == -1)] = text[sa[i]-1];
-    bwt_wm_.init(n, bwt, bwt_t);
+    if (n) {
+      bwt[0] = text[n-1];
+      REP(i, n)
+        if (! sa[i])
+          initial_ = i+1;
+        else
+          bwt[i + (initial_ == -1)] = text[sa[i]-1];
+      bwt_wm_.init(n, bwt, bwt_t);
+    }
     delete[] tmp;
     delete[] sa;
   }
   // backward search: count occurrences in rotated string
   pair<u64, u64> get_range(u64 m, const u8 *pattern) const {
+    if (! m)
+      return {0, n_};
     u8 c = pattern[m-1];
     u64 i = m-1, l = cnt_lt_[c], h = cnt_lt_[c+1];
     // [l, h) denotes rows [l+1,h+1) of BWT matrix of text+'$'
@@ -1080,14 +1080,7 @@ public:
 
   u64 locate(u64 m, const u8 *pattern, bool autocomplete, u64 limit, u64 &skip, vector<u64> &res) const {
     u64 l, h, total;
-    if (m) {
-      auto x = get_range(m, pattern);
-      l = x.first;
-      h = x.second;
-    } else {
-      l = 0;
-      h = n_;
-    }
+    tie(l, h) = get_range(m, pattern);
     total = h-l;
     u64 delta = min(h-l, skip);
     l += delta;
@@ -1264,18 +1257,19 @@ void print_help(FILE *fh)
         "  -h, --help                display this help and exit\n"
         "\n"
         "Examples:\n"
-        "  zsh0: ./indexer -o -i /tmp/ray && ./indexer /tmp/ray # build index oneshot and run server\n"
+        "  zsh0: ./indexer -o -i /tmp/ray # build index oneshot and run server\n"
         "  zsh0: ./indexer -i /tmp/ray # build index and use inotify to watch changes within /tmp/ray, creating indices upon CLOSE_WRITE after CREATE/MODIFY, and MOVED_TO, removing indices upon DELETE and MOVED_FROM\n"
         "  zsh1: print -rn -- $'\\0\\0\\0haystack' | socat -t 60 - /tmp/search.sock # autocomplete\n"
         "  zsh1: print -rn -- $'3\\0\\0\\0haystack' | socat -t 60 - /tmp/search.sock # search, offset=3\n"
-        "  zsh1: print -rn -- $'5\\0a\\0b\\0ha\\0stack\\0' | socat -t 60 - /tmp/search.sock # search filenames F satisfying (\"a\" <= F <= \"b\"), offset=5. NUL is allowed in pattern\n"
+        "  zsh1: print -rn -- $'5\\0a\\0b\\0ha\\0stack\\0' | socat -t 60 - /tmp/search.sock # search filenames F satisfying (\"a\" <= F <= \"b\"), offset=5. \\-escape is allowed in pattern\n"
         , fh);
   exit(fh == stdout ? 0 : EX_USAGE);
 }
 
 struct Entry
 {
-  int data_fd, index_fd;
+  FILE* index_fh;
+  int data_fd;
   off_t data_size, index_size;
   void *data_mmap, *index_mmap;
   FMIndex *fm;
@@ -1284,7 +1278,7 @@ struct Entry
     munmap(data_mmap, data_size);
     munmap(index_mmap, index_size);
     close(data_fd);
-    close(index_fd);
+    fclose(index_fh);
   }
 };
 
@@ -1493,42 +1487,46 @@ namespace Server
   }
 
   void* add_data_worker(void* data_path_) {
-    void rm_index(const string& index_path);
     string* data_path = (string*)data_path_;
     string index_path = data_to_index(*data_path);
-    int index_fd = -1, data_fd = -1;
-    off_t data_size;
-    void* data_mmap = MAP_FAILED;
+    int data_fd = -1, index_fd = -1;
+    off_t data_size, index_size;
+    void *data_mmap = MAP_FAILED, *index_mmap = MAP_FAILED;
+    bool rebuild = true;
     FILE* fh = NULL;
     errno = 0;
     if ((data_fd = open(data_path->c_str(), O_RDONLY)) < 0)
       goto quit;
     if ((data_size = lseek(data_fd, 0, SEEK_END)) < 0)
       goto quit;
+    if (data_size > 0 && (data_mmap = mmap(NULL, data_size, PROT_READ, MAP_SHARED, data_fd, 0)) == MAP_FAILED)
+      goto quit;
     if ((index_fd = open(index_path.c_str(), O_RDWR | O_CREAT, 0666)) < 0)
       goto quit;
     {
-      char buf[2*sizeof(off_t)];
+      off_t buf[2];
       int nread;
-      if ((nread = read(index_fd, buf, sizeof buf)) < 0)
+      if ((index_size = lseek(index_fd, 0, SEEK_END)) < 2*sizeof(off_t))
+        ;
+      else if ((nread = read(index_fd, buf, sizeof buf)) < 0)
         goto quit;
-      // skip good index file
-      if (nread == 0)
+      else if (nread == 0)
        ;
       else if (nread < sizeof(off_t) || memcmp(buf, MAGIC_GOOD, sizeof(off_t)))
         log_status("index file %s: bad magic, rebuilding\n", index_path.c_str());
-      else if (nread < 2*sizeof(off_t) || ((off_t*)buf)[1] != data_size)
+      else if (nread < 2*sizeof(off_t) || buf[1] != data_size)
         log_status("index file %s: mismatching length of data file, rebuilding\n", index_path.c_str());
       else
-        goto quit;
+        goto load;
     }
-    if (data_size > 0 && (data_mmap = mmap(NULL, data_size, PROT_READ, MAP_SHARED, data_fd, 0)) == MAP_FAILED)
-      goto quit;
-    if (! (fh = fdopen(index_fd, "w")))
-      goto quit;
-    rm_index(index_path);
-    if (data_size > 0) {
+    if (loaded.find(*data_path)) {
+      loaded.erase(*data_path);
+      log_action("rebuilding index of %s\n", data_path->c_str());
+    }
+    {
       StopWatch sw;
+      if (! (fh = fdopen(index_fd, "w")))
+        goto quit;
       if (fseek(fh, 0, SEEK_SET) < 0)
         err_exit(EX_IOERR, "fseek");
       if (fwrite(MAGIC_BAD, sizeof(off_t), 1, fh) != 1)
@@ -1539,17 +1537,38 @@ namespace Server
       FMIndex fm;
       fm.init(data_size, (const u8 *)data_mmap, fmindex_sample_rate);
       ar & fm;
-      off_t index_size = ftello(fh);
-      ftruncate(index_fd, index_size);
-      fseek(fh, 0, SEEK_SET);
-      fwrite(MAGIC_GOOD, sizeof(off_t), 1, fh);
-      fwrite(&data_size, sizeof(off_t), 1, fh);
-      if (ferror(fh)) {
-        unlink(index_path.c_str());
-        goto quit;
-      }
+      index_size = ftello(fh);
+      if (ftruncate(index_fd, index_size) < 0)
+        err_exit(EX_IOERR, "ftruncate");
+      if (fseek(fh, 0, SEEK_SET) < 0)
+        err_exit(EX_IOERR, "fseek");
+      if (fwrite(MAGIC_GOOD, sizeof(off_t), 1, fh) != 1)
+        err_exit(EX_IOERR, "fwrite");
+      if (fwrite(&data_size, sizeof(off_t), 1, fh) != 1)
+        err_exit(EX_IOERR, "fwrite");
       log_action("created index of %s. data: %ld, index: %ld, used %.3lf s\n", data_path->c_str(), data_size, index_size, sw.elapsed());
     }
+load:
+    {
+      if ((index_mmap = mmap(NULL, index_size, PROT_READ, MAP_SHARED, index_fd, 0)) == MAP_FAILED)
+        goto quit;
+      Deserializer ar((u8*)index_mmap+2*sizeof(off_t));
+      auto entry = make_shared<Entry>();
+      entry->data_fd = data_fd;
+      entry->index_fh = fh;
+      entry->data_size = data_size;
+      entry->index_size = index_size;
+      entry->data_mmap = data_mmap;
+      entry->index_mmap = index_mmap;
+      entry->fm = new FMIndex;
+      ar & *entry->fm;
+      pthread_mutex_lock(&mutex);
+      loaded.insert(*data_path, entry);
+      pthread_cond_signal(&cleaner_cond);
+      pthread_mutex_unlock(&mutex);
+      log_action("loaded index of %s\n", data_path->c_str());
+    }
+    goto success;
 quit:
     if (fh)
       fclose(fh);
@@ -1559,6 +1578,7 @@ quit:
       munmap(data_mmap, data_size);
     if (data_fd >= 0)
       close(data_fd);
+success:
     delete data_path;
     if (errno)
       err_msg("failed to index %s", data_path->c_str());
@@ -1570,75 +1590,6 @@ quit:
     detached_thread(add_data_worker, new string(data_path));
   }
 
-  void rm_index(const string& index_path) {
-    string data_path = index_to_data(index_path);
-    if (! is_data(data_path)) return;
-    if (loaded.find(data_path)) {
-      loaded.erase(data_path);
-      log_action("unloaded index of %s\n", data_path.c_str());
-    }
-  }
-
-  void add_index(const string& index_path) {
-    string data_path = index_to_data(index_path);
-    if (! is_data(data_path)) return;
-    auto entry = make_shared<Entry>();
-    entry->data_mmap = entry->index_mmap = MAP_FAILED;
-    errno = 0;
-    if ((entry->data_fd = open(data_path.c_str(), O_RDONLY)) < 0)
-      goto quit;
-    if ((entry->index_fd = open(index_path.c_str(), O_RDONLY)) < 0) {
-      if (errno == ENOENT) {
-        errno = 0;
-        log_status("skiping %s: no index\n", data_path.c_str());
-      }
-      goto quit;
-    }
-    if ((entry->data_size = lseek(entry->data_fd, 0, SEEK_END)) < 0)
-      goto quit;
-    if ((entry->index_size = lseek(entry->index_fd, 0, SEEK_END)) < 0)
-      goto quit;
-    if (entry->data_size > 0 && (entry->data_mmap = mmap(NULL, entry->data_size, PROT_READ, MAP_SHARED, entry->data_fd, 0)) == MAP_FAILED)
-      goto quit;
-    if (entry->index_size > 0 && (entry->index_mmap = mmap(NULL, entry->index_size, PROT_READ, MAP_SHARED, entry->index_fd, 0)) == MAP_FAILED)
-      goto quit;
-    rm_index(index_path);
-    if (entry->index_size < 2*sizeof(off_t)) {
-      log_status("invalid index file %s: length < 2*sizeof(off_t)\n", index_path.c_str());
-      goto quit;
-    }
-    if (memcmp(entry->index_mmap, MAGIC_GOOD, sizeof(off_t))) {
-      log_status("index file %s: bad magic\n", index_path.c_str());
-      goto quit;
-    }
-    if (((off_t*)entry->index_mmap)[1] != entry->data_size) {
-      log_status("index file %s: mismatching length of data file\n", index_path.c_str());
-      goto quit;
-    }
-    if (entry->index_size > 0) {
-      Deserializer ar((u8*)entry->index_mmap+2*sizeof(off_t));
-      entry->fm = new FMIndex;
-      ar & *entry->fm;
-      pthread_mutex_lock(&mutex);
-      loaded.insert(data_path, entry);
-      pthread_cond_signal(&cleaner_cond);
-      pthread_mutex_unlock(&mutex);
-      log_action("loaded index of %s\n", data_path.c_str());
-    }
-    return;
-quit:
-    if (entry->data_mmap != MAP_FAILED)
-      munmap(entry->data_mmap, entry->data_size);
-    if (entry->index_mmap != MAP_FAILED)
-      munmap(entry->index_mmap, entry->index_size);
-    if (entry->data_fd >= 0)
-      close(entry->data_fd);
-    if (entry->index_fd >= 0)
-      close(entry->index_fd);
-    if (errno)
-      err_msg("failed to load index file %s", index_path.c_str());
-  }
-
   void walk(long depth, long dir_fd, string path, const char* file) {
     int fd = -1;
     struct stat statbuf;
@@ -1646,7 +1597,6 @@ quit:
       err_msg_g("stat");
     if (S_ISREG(statbuf.st_mode)) {
       if (is_data(path)) add_data(path);
-      if (is_index(path)) add_index(path);
     } else if (S_ISDIR(statbuf.st_mode)) {
       if (! opt_recursive && depth > 0) goto quit;
       if (inotify_fd >= 0)
@@ -1680,7 +1630,7 @@ quit:;
          ev = (inotify_event *)((char *)ev + sizeof(inotify_event) + ev->len))
       if (ev->len > 0 || ev->mask & (IN_IGNORED | IN_MOVE_SELF)) {
         const char* dir = wd2dir[ev->wd].c_str();
-        bool data = is_data(ev->name), index = is_index(ev->name);
+        bool data = is_data(ev->name);
         string path = to_path(dir, ev->name);
         if (ev->mask & (IN_CREATE | IN_MOVED_TO)) {
           if (ev->mask & IN_CREATE)
@@ -1690,13 +1640,12 @@ quit:;
 
           if (ev->mask & IN_ISDIR)
             opt_recursive && inotify_add_dir(path.c_str());
-          else if (data || index) {
+          else if (data) {
             struct stat statbuf;
             if (lstat(path.c_str(), &statbuf) < 0) continue;
             if (ev->mask & IN_MOVED_TO || S_ISLNK(statbuf.st_mode)) {
               modified.erase(path);
-              if (data) add_data(path);
-              if (index) add_index(path);
+              add_data(path);
             } else
               modified.insert(path);
           }
@@ -1708,7 +1657,6 @@ quit:;
           if (! (ev->mask & IN_ISDIR)) {
             modified.erase(path);
             if (data) rm_data(path);
-            if (index) rm_index(path);
           }
         } else if (ev->mask & IN_IGNORED) {
           log_event("IGNORED %s\n", dir);
@@ -1717,8 +1665,7 @@ quit:;
             wd2dir.erase(ev->wd);
           }
         } else if (ev->mask & IN_MODIFY) {
-          if (data || index)
-            modified.insert(path);
+          if (data) modified.insert(path);
         } else if (ev->mask & IN_MOVE_SELF)
           err_exit(EX_OSFILE, "'%s' has been moved", wd2dir[ev->wd].c_str());
         else if (ev->mask & IN_CLOSE_WRITE) {
@@ -1726,7 +1673,6 @@ quit:;
             log_event("CLOSE_WRITE after MODIFY %s\n", path.c_str());
             modified.erase(path);
             if (data) add_data(path);
-            if (index) add_index(path);
           }
         }
       }
@@ -1873,7 +1819,7 @@ quit:
     }
     for (auto dir: data_dir)
       walk(0, AT_FDCWD, dir, dir);
-    detached_thread(cleaner, nullptr);
+    //detached_thread(cleaner, nullptr);
 
     while (request_count) {
       struct pollfd fds[3];
@@ -2013,6 +1959,8 @@ int main(int argc, char *argv[])
   D(autocomplete_limit);
   D(search_limit);
   Server::run();
+  close(log_pipe[0]);
+  close(log_pipe[1]);
 
 #undef D
 }
