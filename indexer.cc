@@ -1456,7 +1456,7 @@ template<> vector<RefCountTreap<string, shared_ptr<Entry>>::Node*> RefCountTreap
 
 namespace Server
 {
-  int inotify_fd;
+  int inotify_fd = -1;
   map<int, string> wd2dir;
   map<string, int> dir2wd;
   set<string> modified;
@@ -1936,7 +1936,6 @@ quit:
 int main(int argc, char *argv[])
 {
   bool is_index_mode = false;
-  bool opt_inotify = true;
 
   int opt;
   static struct option long_options[] = {
