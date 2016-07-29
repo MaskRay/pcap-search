@@ -1147,8 +1147,8 @@ struct Serializer
     off_t o = ftello(fh);
     if (o == -1)
       err_exit(EX_IOERR, "ftello");
-    if (o%n && fseek(fh, o+n-o%n, SEEK_SET))
-      err_exit(EX_IOERR, "fseek");
+    if (o%n && fseeko(fh, o+n-o%n, SEEK_SET))
+      err_exit(EX_IOERR, "fseeko");
   }
 };
 
@@ -1373,10 +1373,9 @@ struct RefCountTreap {
   }
 
   struct Backward {
-    vector<Node*> st;
     Node* x;
-    Backward(Node* x) : x(x) {}
-    void step() {
+    vector<Node*> st;
+    void weave() {
       for (; x; x = x->c[1])
         st.push_back(x);
       if (st.size()) {
@@ -1385,20 +1384,51 @@ struct RefCountTreap {
       }
     }
     Backward begin() {
-      step();
+      weave();
       return *this;
     }
-    Backward end() { return Backward(nullptr); }
+    Backward end() { return Backward{nullptr}; }
     bool operator!=(const Backward& o) { return x != o.x; }
-    Backward operator++() {
-      x = x->c[0];
-      step();
-      return *this;
-    }
+    Backward operator++() { x = x->c[0]; weave(); return *this; }
     Node& operator*() { return *x; }
   };
 
-  Backward backward(Node* x) { return Backward(x); }
+  Backward backward(Node* x) { return Backward{x}; }
+
+  struct RangeBackward {
+    Node* x;
+    Key l, h, min, max;
+    vector<tuple<Node*, Key, Key>> st;
+    void step() {
+      if ((h = x->key) < min)
+        x = nullptr;
+      else
+        x = x->c[0];
+    }
+    void weave() {
+      for(;;) {
+        for (; x && l <= max; x = x->c[1]) {
+          st.emplace_back(x, l, h);
+          l = x->key;
+        }
+        if (st.empty()) {
+          x = nullptr;
+          return;
+        }
+        tie(x, l, h) = st.back();
+        st.pop_back();
+        if (min <= x->key && x->key <= max) return;
+        step();
+      }
+    }
+    RangeBackward begin() { weave(); return *this; }
+    RangeBackward end() { return RangeBackward{nullptr, l, h, min, max}; }
+    bool operator!=(const RangeBackward& o) { return x != o.x; }
+    RangeBackward operator++() { step(); weave(); return *this; }
+    Node& operator*() { return *x; }
+  };
+
+  RangeBackward range_backward(Node* x, Key l, Key h, Key min, Key max) { return RangeBackward{x, l, h, min, max}; }
 };
 
 template<> vector<RefCountTreap<string, shared_ptr<Entry>>::Node*> RefCountTreap<string, shared_ptr<Entry>>::roots{};
@@ -1500,8 +1530,8 @@ namespace Server
       StopWatch sw;
       if (! (fh = fdopen(index_fd, "w")))
         goto quit;
-      if (fseek(fh, 0, SEEK_SET) < 0)
-        err_exit(EX_IOERR, "fseek");
+      if (fseeko(fh, 0, SEEK_SET) < 0)
+        err_exit(EX_IOERR, "fseeko");
       if (fwrite(MAGIC_BAD, sizeof(off_t), 1, fh) != 1)
         err_exit(EX_IOERR, "fwrite");
       if (fwrite(MAGIC_BAD, sizeof(off_t), 1, fh) != 1) // length of origin
@@ -1513,8 +1543,8 @@ namespace Server
       index_size = ftello(fh);
       if (ftruncate(index_fd, index_size) < 0)
         err_exit(EX_IOERR, "ftruncate");
-      if (fseek(fh, 0, SEEK_SET) < 0)
-        err_exit(EX_IOERR, "fseek");
+      if (fseeko(fh, 0, SEEK_SET) < 0)
+        err_exit(EX_IOERR, "fseeko");
       if (fwrite(MAGIC_GOOD, sizeof(off_t), 1, fh) != 1)
         err_exit(EX_IOERR, "fwrite");
       if (fwrite(&data_size, sizeof(off_t), 1, fh) != 1)
@@ -1703,26 +1733,25 @@ quit:;
       if (root) root->refcnt++;
       pthread_mutex_unlock(&mutex);
 
-      ulong total = 0, t;
+      vector<ulong> res;
+      ulong total = 0;
+      string pattern = unescape(len, p), low, high("\xff"); // assume low <= filepath <= high
+      auto range = loaded.range_backward(root, low, high, *file_begin ? string(file_begin) : low, *file_end ? string(file_end) : high);
       // autocomplete
       if (! buf[0]) {
         typedef tuple<string, ulong, string> cand_type;
         ulong skip = 0;
-        vector<ulong> res;
         vector<cand_type> candidates;
-        for (auto& it: loaded.backward(root)) {
+        for (auto& it: range) {
           auto entry = it.val;
           auto old_size = res.size();
-          string pattern = unescape(len, p);
           entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), true, autocomplete_limit, skip, res);
           FOR(i, old_size, res.size())
             candidates.emplace_back(it.key, res[i], string((char*)entry->data_mmap+res[i], (char*)entry->data_mmap+min(ulong(entry->data_size), res[i]+len+autocomplete_length)));
           if (res.size() >= autocomplete_limit) break;
         }
-        sort(candidates.begin(), candidates.end());
-        candidates.erase(unique(candidates.begin(), candidates.end(), [](const cand_type &x, const cand_type &y) {
-                                return get<2>(x) == get<2>(y);
-                                }), candidates.end());
+        sort(candidates.begin(), candidates.end(), [](const cand_type& x, const cand_type& y) { return get<2>(x) < get<2>(y); });
+        candidates.erase(unique(candidates.begin(), candidates.end(), [](const cand_type &x, const cand_type &y) { return get<2>(x) == get<2>(y); }), candidates.end());
         for (auto& cand: candidates)
           if (dprintf(connfd, "%s\t%lu\t%s\n", get<0>(cand).c_str(), get<1>(cand), escape(get<2>(cand)).c_str()) < 0)
             goto quit;
@@ -1731,18 +1760,14 @@ quit:;
         errno = 0;
         ulong skip = strtoul(buf, &end, 0);
         if (! *end && ! errno) {
-          vector<ulong> res;
-          for (auto& it: loaded.backward(root)) {
+          for (auto& it: range) {
             auto entry = it.val;
-            if ((! *file_begin || string(file_begin) <= it.key) && (! *file_end || it.key <= string(file_end))) {
-              auto old_size = res.size();
-              string pattern = unescape(len, p);
-              total += entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), false, search_limit, skip, res);
-              FOR(i, old_size, res.size())
-                if (dprintf(connfd, "%s\t%lu\t%lu\n", it.key.c_str(), res[i], len) < 0)
-                  goto quit;
-              if (res.size() >= autocomplete_limit) break;
-            }
+            auto old_size = res.size();
+            total += entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), false, search_limit, skip, res);
+            FOR(i, old_size, res.size())
+              if (dprintf(connfd, "%s\t%lu\t%lu\n", it.key.c_str(), res[i], len) < 0)
+                goto quit;
+            if (res.size() >= search_limit) break;
           }
           dprintf(connfd, "%lu\n", total);
         }
