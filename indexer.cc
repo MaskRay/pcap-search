@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <functional>
 #include <getopt.h>
+#include <cinttypes>
 #include <map>
 #include <netinet/in.h>
 #include <poll.h>
@@ -63,8 +64,8 @@ typedef int32_t i32;
 #define MAGENTA "\x1b[35m"
 #define CYAN "\x1b[36m"
 
-const char MAGIC_BAD[] = "BAD ";
-const char MAGIC_GOOD[] = "GOOD";
+const char MAGIC_BAD[] = "BAD MEOW";
+const char MAGIC_GOOD[] = "GOODMEOW";
 const long LOGAB = CHAR_BIT, AB = 1L << LOGAB;
 
 const size_t BUF_SIZE = 512;
@@ -322,7 +323,7 @@ string unescape(size_t n, const char *str)
         case 'r': ret += '\r'; i += 2; continue;
         case '\\': ret += '\\'; i += 2; continue;
         }
-      int j = i+1, v = 0;
+      size_t j = i+1, v = 0;
       for (; j < n && j < i+4 && unsigned(str[j]-'0') < 8; j++)
         v = v*8+str[j]-'0';
       if (i+1 < j) {
@@ -331,7 +332,7 @@ string unescape(size_t n, const char *str)
         continue;
       }
     }
-    ret += str[i++];
+    ret.push_back(str[i++]);
   }
   return ret;
 }
@@ -1018,7 +1019,7 @@ public:
     cnt_lt_[AB] = cnt;
 
     int *sa = new int[n];
-    int *tmp = new int[max(2*n, u64(AB))];
+    int *tmp = new int[max(n, u64(AB))];
     u64 sampled_n = (n-1+samplerate)/samplerate;
     EliasFanoBuilder efb(sampled_n, n-1);
     ssa_.init(sampled_n);
@@ -1034,6 +1035,7 @@ public:
 
     // 'initial' is the position of '$' in BWT of text+'$'
     // BWT of text (sentinel character is implicit)
+    // sizeof(int) >= 2*sizeof(u8)
     u8 *bwt = (u8 *)tmp, *bwt_t = (u8 *)tmp+n;
     initial_ = -1;
     bwt[0] = text[n-1];
@@ -1047,9 +1049,9 @@ public:
     delete[] sa;
   }
   // backward search: count occurrences in rotated string
-  pair<u32, u32> get_range(u32 m, const u8 *pattern) const {
+  pair<u64, u64> get_range(u64 m, const u8 *pattern) const {
     u8 c = pattern[m-1];
-    u32 i = m-1, l = cnt_lt_[c], h = cnt_lt_[c+1];
+    u64 i = m-1, l = cnt_lt_[c], h = cnt_lt_[c+1];
     // [l, h) denotes rows [l+1,h+1) of BWT matrix of text+'$'
     // row 'i' of the first column of BWT matrix is mapped to row i+(i<initial_) of the last column
     while (l < h && i) {
@@ -1060,24 +1062,24 @@ public:
     return {l, h};
   }
   // m > 0
-  u32 count(u32 m, const u8 *pattern) const {
+  u64 count(u64 m, const u8 *pattern) const {
     if (! m) return n_;
     auto x = get_range(m, pattern);
     return x.second-x.first;
   }
 
-  u32 calc_sa(u32 rank) const {
-    u32 d = 0, i = rank;
+  u64 calc_sa(u64 rank) const {
+    u64 d = 0, i = rank;
     while (! sampled_ef_.exist(i)) {
-      int c = bwt_wm_[i + (i < initial_)];
+      u64 c = bwt_wm_[i + (i < initial_)];
       i = cnt_lt_[c] + bwt_wm_.rank(c, i + (i < initial_));
       d++;
     }
     return ssa_[sampled_ef_.rank(i)] + d;
   }
 
-  u32 locate(u32 m, const u8 *pattern, bool autocomplete, u32 limit, u32 &skip, vector<u32> &res) const {
-    u32 l, h, total;
+  u64 locate(u64 m, const u8 *pattern, bool autocomplete, u64 limit, u64 &skip, vector<u64> &res) const {
+    u64 l, h, total;
     if (m) {
       auto x = get_range(m, pattern);
       l = x.first;
@@ -1087,18 +1089,18 @@ public:
       h = n_;
     }
     total = h-l;
-    u32 delta = min(h-l, skip);
+    u64 delta = min(h-l, skip);
     l += delta;
     skip -= delta;
-    u32 step = autocomplete ? max((h-l)/limit, u32(1)) : 1;
+    u64 step = autocomplete ? max((h-l)/limit, u64(1)) : 1;
     for (; l < h && res.size() < limit; l += step) {
-      u32 d = 0, i = l;
+      u64 d = 0, i = l;
       while (! sampled_ef_.exist(i)) {
         int c = bwt_wm_[i + (i < initial_)];
         i = cnt_lt_[c] + bwt_wm_.rank(c, i + (i < initial_));
         d++;
       }
-      u32 pos = ssa_[sampled_ef_.rank(i)] + d;
+      u64 pos = ssa_[sampled_ef_.rank(i)] + d;
       res.push_back(pos);
     }
     return total;
@@ -1188,6 +1190,7 @@ struct Deserializer
   }
 
   Deserializer& operator&(u64 &x) {
+    x = 0;
     memcpy(&x, a_, sizeof(u32));
     a_ = (u32 *)a_ + 1;
     return *this;
@@ -1281,7 +1284,8 @@ void print_help(FILE *fh)
 
 struct Entry
 {
-  int data_fd, index_fd, data_size, index_size;
+  int data_fd, index_fd;
+  off_t data_size, index_size;
   void *data_mmap, *index_mmap;
   FMIndex *fm;
   ~Entry() {
@@ -1513,16 +1517,16 @@ namespace Server
     if ((index_fd = open(index_path.c_str(), O_RDWR | O_CREAT, 0666)) < 0)
       goto quit;
     {
-      char buf[8];
+      char buf[2*sizeof(off_t)];
       int nread;
-      if ((nread = read(index_fd, buf, 8)) < 0)
+      if ((nread = read(index_fd, buf, sizeof buf)) < 0)
         goto quit;
       // skip good index file
       if (nread == 0)
        ;
-      else if (nread < 4 || memcmp(buf, MAGIC_GOOD, 4))
+      else if (nread < sizeof(off_t) || memcmp(buf, MAGIC_GOOD, sizeof(off_t)))
         log_status("index file %s: bad magic, rebuilding\n", index_path.c_str());
-      else if (nread < 8 || ((i32*)buf)[1] != data_size)
+      else if (nread < 2*sizeof(off_t) || ((off_t*)buf)[1] != data_size)
         log_status("index file %s: mismatching length of data file, rebuilding\n", index_path.c_str());
       else
         goto quit;
@@ -1536,19 +1540,19 @@ namespace Server
       StopWatch sw;
       if (fseek(fh, 0, SEEK_SET) < 0)
         err_exit(EX_IOERR, "fseek");
-      if (fputs(MAGIC_BAD, fh) < 0)
-        err_exit(EX_IOERR, "fputs");
-      if (fputs(MAGIC_BAD, fh) < 0) // length of origin
-        err_exit(EX_IOERR, "fputs");
+      if (fwrite(MAGIC_BAD, sizeof(off_t), 1, fh) != 1)
+        err_exit(EX_IOERR, "fwrite");
+      if (fwrite(MAGIC_BAD, sizeof(off_t), 1, fh) != 1) // length of origin
+        err_exit(EX_IOERR, "fwrite");
       Serializer ar(fh);
       FMIndex fm;
       fm.init(data_size, (const u8 *)data_mmap, fmindex_sample_rate);
       ar & fm;
-      long index_size = ftell(fh);
+      off_t index_size = ftello(fh);
       ftruncate(index_fd, index_size);
       fseek(fh, 0, SEEK_SET);
-      fputs(MAGIC_GOOD, fh);
-      fwrite(&data_size, 4, 1, fh);
+      fwrite(MAGIC_GOOD, sizeof(off_t), 1, fh);
+      fwrite(&data_size, sizeof(off_t), 1, fh);
       if (ferror(fh)) {
         unlink(index_path.c_str());
         goto quit;
@@ -1608,20 +1612,20 @@ quit:
     if (entry->index_size > 0 && (entry->index_mmap = mmap(NULL, entry->index_size, PROT_READ, MAP_SHARED, entry->index_fd, 0)) == MAP_FAILED)
       goto quit;
     rm_index(index_path);
-    if (entry->index_size < 8) {
-      log_status("invalid index file %s: length < 8\n", index_path.c_str());
+    if (entry->index_size < 2*sizeof(off_t)) {
+      log_status("invalid index file %s: length < 2*sizeof(off_t)\n", index_path.c_str());
       goto quit;
     }
-    if (memcmp(entry->index_mmap, MAGIC_GOOD, 4)) {
+    if (memcmp(entry->index_mmap, MAGIC_GOOD, sizeof(off_t))) {
       log_status("index file %s: bad magic\n", index_path.c_str());
       goto quit;
     }
-    if (((int*)entry->index_mmap)[1] != entry->data_size) {
+    if (((off_t*)entry->index_mmap)[1] != entry->data_size) {
       log_status("index file %s: mismatching length of data file\n", index_path.c_str());
       goto quit;
     }
     if (entry->index_size > 0) {
-      Deserializer ar((char*)entry->index_mmap+strlen(MAGIC_GOOD)+4);
+      Deserializer ar((u8*)entry->index_mmap+2*sizeof(off_t));
       entry->fm = new FMIndex;
       ar & *entry->fm;
       pthread_mutex_lock(&mutex);
@@ -1781,12 +1785,12 @@ quit:;
       if (root) root->refcnt++;
       pthread_mutex_unlock(&mutex);
 
-      u32 len = buf+nread-p, total = 0, t;
+      u64 len = buf+nread-p, total = 0, t;
       // autocomplete
       if (! buf[0]) {
-        typedef tuple<string, u32, string> cand_type;
-        u32 skip = 0;
-        vector<u32> res;
+        typedef tuple<string, u64, string> cand_type;
+        u64 skip = 0;
+        vector<u64> res;
         vector<cand_type> candidates;
         for (auto& it: loaded.backward(root)) {
           auto entry = it.val;
@@ -1795,7 +1799,7 @@ quit:;
             string pattern = unescape(len, p);
             entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), true, autocomplete_limit, skip, res);
             FOR(i, old_size, res.size())
-              candidates.emplace_back(it.key, res[i], string((char*)entry->data_mmap+res[i], (char*)entry->data_mmap+min(long(entry->data_size), res[i]+len+autocomplete_length)));
+              candidates.emplace_back(it.key, res[i], string((char*)entry->data_mmap+res[i], (char*)entry->data_mmap+min(u64(entry->data_size), res[i]+len+autocomplete_length)));
             if (res.size() >= autocomplete_limit) break;
           }
         }
@@ -1809,9 +1813,9 @@ quit:;
       } else {
         char *end;
         errno = 0;
-        u32 skip = strtol(buf, &end, 0);
+        u64 skip = strtoull(buf, &end, 0);
         if (! *end && ! errno) {
-          vector<u32> res;
+          vector<u64> res;
           for (auto& it: loaded.backward(root)) {
             auto entry = it.val;
             if ((! *file_begin || string(file_begin) <= it.key) && (! *file_end || it.key <= string(file_end)) && entry->data_size > 0) {
@@ -1819,12 +1823,12 @@ quit:;
               string pattern = unescape(len, p);
               total += entry->fm->locate(pattern.size(), (const u8*)pattern.c_str(), false, search_limit, skip, res);
               FOR(i, old_size, res.size())
-                if (dprintf(connfd, "%s\t%u\t%u\n", it.key.c_str(), res[i], len) < 0)
+                if (dprintf(connfd, "%s\t%" PRIu64 "\t%" PRIu64 "\n", it.key.c_str(), res[i], len) < 0)
                   goto quit;
               if (res.size() >= autocomplete_limit) break;
             }
           }
-          dprintf(connfd, "%u\n", total);
+          dprintf(connfd, "%" PRIu64 "\n", total);
         }
       }
 
