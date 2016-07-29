@@ -1517,9 +1517,7 @@ namespace Server
     {
       off_t buf[2];
       int nread;
-      if ((index_size = lseek(index_fd, 0, SEEK_END)) < 2*sizeof(off_t))
-        ;
-      else if ((nread = read(index_fd, buf, sizeof buf)) < 0)
+      if ((nread = read(index_fd, buf, sizeof buf)) < 0)
         goto quit;
       else if (nread == 0)
        ;
@@ -1527,6 +1525,8 @@ namespace Server
         log_status("index file %s: bad magic, rebuilding\n", index_path.c_str());
       else if (nread < 2*sizeof(off_t) || buf[1] != data_size)
         log_status("index file %s: mismatching length of data file, rebuilding\n", index_path.c_str());
+      else if ((index_size = lseek(index_fd, 0, SEEK_END)) < 2*sizeof(off_t))
+        ;
       else
         goto load;
     }
@@ -1557,6 +1557,8 @@ namespace Server
         err_exit(EX_IOERR, "fwrite");
       if (fwrite(&data_size, sizeof(off_t), 1, fh) != 1)
         err_exit(EX_IOERR, "fwrite");
+      if (fflush(fh) == EOF)
+        err_exit(EX_IOERR, "fflush");
       log_action("created index of %s. data: %ld, index: %ld, used %.3lf s\n", data_path->c_str(), data_size, index_size, sw.elapsed());
     }
 load:
