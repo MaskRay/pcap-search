@@ -1356,14 +1356,13 @@ struct RefCountTreap {
     return find(root, key);
   }
   Node* find(Node* x, const Key& key) {
-    for(;;) {
-      if (x->key < key) x = x->c[0];
-      else if (x->key > key) x = x->c[1];
+    while (x) {
+      if (key < x->key) x = x->c[0];
+      else if (key > x->key) x = x->c[1];
       else break;
     }
     return x;
   }
-
 
   void insert(const Key& key, const Val& val) {
     roots.push_back(root);
@@ -1493,12 +1492,13 @@ namespace Server
     else if (errno != ENOENT)
       err_msg("failed to unlink %s", index_path.c_str());
     if (loaded.find(data_path)) {
-      loaded.erase(index_path);
+      loaded.erase(data_path);
       log_action("unloaded index of %s\n", data_path.c_str());
     }
   }
 
   void* add_data_worker(void* data_path_) {
+    void rm_index(const string& index_path);
     string* data_path = (string*)data_path_;
     string index_path = data_to_index(*data_path);
     int index_fd = -1, data_fd = -1;
@@ -1531,6 +1531,7 @@ namespace Server
       goto quit;
     if (! (fh = fdopen(index_fd, "w")))
       goto quit;
+    rm_index(index_path);
     if (data_size > 0) {
       StopWatch sw;
       if (fseek(fh, 0, SEEK_SET) < 0)
@@ -1575,10 +1576,10 @@ quit:
   }
 
   void rm_index(const string& index_path) {
-    string data_path = index_path.substr(index_path.size()-index_suffix.size());
+    string data_path = index_to_data(index_path);
     if (! is_data(data_path)) return;
     if (loaded.find(data_path)) {
-      loaded.erase(index_path);
+      loaded.erase(data_path);
       log_action("unloaded index of %s\n", data_path.c_str());
     }
   }
@@ -1924,6 +1925,7 @@ quit:
     for (auto x: loaded.roots)
       if (x)
         x->unref();
+    loaded.clear();
   }
 }
 
