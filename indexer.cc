@@ -260,7 +260,7 @@ ulong select_in_ulong(ulong x, ulong k)
   if (c > k) return select_in_u16(x, k) + 0;
   x >>= 16;
   k -= c;
-  return select_in_u16(x, k) + 48;
+  return select_in_u16(x, k) + 16;
 #else
 # error "unsupported"
 #endif
