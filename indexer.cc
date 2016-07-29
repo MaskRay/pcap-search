@@ -2,7 +2,6 @@
 # define _GNU_SOURCE
 #endif
 #include <algorithm>
-#include <atomic>
 #include <arpa/inet.h>
 #include <cassert>
 #include <cctype>
@@ -84,7 +83,6 @@ double request_timeout = 1;
 long request_count = -1;
 bool opt_inotify = true;
 bool opt_recursive = false;
-atomic<int> ongoing(0), ongoing_indexers;
 
 ///// log
 int log_pipe[2];
@@ -1273,7 +1271,7 @@ void print_help(FILE *fh)
 struct Entry
 {
   FILE* index_fh;
-  int data_fd;
+  int data_fd, index_fd;
   off_t data_size, index_size;
   void *data_mmap, *index_mmap;
   FMIndex *fm;
@@ -1282,18 +1280,21 @@ struct Entry
     munmap(data_mmap, data_size);
     munmap(index_mmap, index_size);
     close(data_fd);
-    fclose(index_fh);
+    if (index_fh)
+      fclose(index_fh);
+    else
+      close(index_fd);
   }
 };
+
+string data_to_index(const string& path)
+{
+  return path+index_suffix;
+}
 
 bool is_data(const string &path)
 {
   return path.size() >= data_suffix.size() && path.substr(path.size()-data_suffix.size()) == data_suffix;
-}
-
-bool is_index(const string &path)
-{
-  return path.size() >= index_suffix.size() && path.substr(path.size()-index_suffix.size()) == index_suffix;
 }
 
 string to_path(string path, string name)
@@ -1304,16 +1305,6 @@ string to_path(string path, string name)
     name = name.substr(1);
   path += name;
   return path;
-}
-
-string data_to_index(const string& path)
-{
-  return path+index_suffix;
-}
-
-string index_to_data(const string& path)
-{
-  return path.substr(0, path.size()-index_suffix.size());
 }
 
 template<class Key, class Val>
@@ -1445,19 +1436,20 @@ template<> vector<RefCountTreap<string, shared_ptr<Entry>>::Node*> RefCountTreap
 
 namespace Server
 {
-  int inotify_fd = -1;
+  int inotify_fd = -1, pending = 0, pending_indexers = 0;
   map<int, string> wd2dir;
   map<string, int> dir2wd;
   set<string> modified;
 
   pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-  pthread_cond_t manager_cond = PTHREAD_COND_INITIALIZER;
+  pthread_cond_t manager_cond = PTHREAD_COND_INITIALIZER,
+                 pending_empty = PTHREAD_COND_INITIALIZER;
   bool manager_quit = false;
   vector<string> indexer_tasks;
   RefCountTreap<string, shared_ptr<Entry>> loaded;
 
   void detached_thread(void* (*start_routine)(void*), void* data) {
-    ongoing++;
+    pending++;
     pthread_t tid;
     pthread_attr_t attr;
     pthread_attr_init(&attr);
@@ -1568,6 +1560,7 @@ load:
       Deserializer ar((u8*)index_mmap+2*sizeof(off_t));
       auto entry = make_shared<Entry>();
       entry->data_fd = data_fd;
+      entry->index_fd = index_fd;
       entry->index_fh = fh;
       entry->data_size = data_size;
       entry->index_size = index_size;
@@ -1595,9 +1588,11 @@ success:
     delete data_path;
     if (errno)
       err_msg("failed to index %s", data_path->c_str());
-    ongoing--;
-    ongoing_indexers--;
+    pthread_mutex_lock(&mutex);
+    pending--;
+    pending_indexers--;
     pthread_cond_signal(&manager_cond);
+    pthread_mutex_unlock(&mutex);
     return NULL;
   }
 
@@ -1786,17 +1781,20 @@ quit:;
     }
 quit:
     close(connfd);
-    ongoing--;
+    pthread_mutex_lock(&mutex);
+    if (! --pending)
+      pthread_cond_signal(&pending_empty);
+    pthread_mutex_unlock(&mutex);
     return NULL;
   }
 
   void* manager(void*) {
     for(;;) {
       pthread_mutex_lock(&mutex);
-      while (! manager_quit && loaded.roots.empty() && (indexer_tasks.empty() || ongoing_indexers >= indexer_limit))
+      while (! manager_quit && loaded.roots.empty() && (indexer_tasks.empty() || pending_indexers >= indexer_limit))
         pthread_cond_wait(&manager_cond, &mutex);
-      while (indexer_tasks.size() && ongoing_indexers < indexer_limit) {
-        ongoing_indexers++;
+      while (indexer_tasks.size() && pending_indexers < indexer_limit) {
+        pending_indexers++;
         detached_thread(indexer, new string(indexer_tasks.back()));
         indexer_tasks.pop_back();
       }
@@ -1808,7 +1806,10 @@ quit:
       pthread_mutex_unlock(&mutex);
       if (manager_quit) break;
     }
-    ongoing--;
+    pthread_mutex_lock(&mutex);
+    if (! --pending)
+      pthread_cond_signal(&pending_empty);
+    pthread_mutex_unlock(&mutex);
     return NULL;
   }
 
@@ -1835,7 +1836,9 @@ quit:
     }
     for (auto dir: data_dir)
       walk(0, AT_FDCWD, dir, dir);
+    pthread_mutex_lock(&mutex);
     detached_thread(manager, nullptr);
+    pthread_mutex_unlock(&mutex);
 
     while (request_count) {
       struct pollfd fds[3];
@@ -1866,7 +1869,9 @@ quit:
       if (fds[1].revents & POLLIN) { // socket
         int connfd = accept(sockfd, NULL, NULL);
         if (connfd < 0) err_exit(EX_OSERR, "accept");
+        pthread_mutex_lock(&mutex);
         detached_thread(request_worker, (void*)(intptr_t)connfd);
+        pthread_mutex_unlock(&mutex);
         if (request_count > 0) request_count--;
       }
       if (2 < nfds && fds[2].revents & POLLIN) // inotifyfd
@@ -1875,11 +1880,13 @@ quit:
     if (inotify_fd >= 0)
       close(inotify_fd);
     close(sockfd);
+    // destructors should be called after all readers & writers of RefCountTreap have finished
+    pthread_mutex_lock(&mutex);
     manager_quit = true;
     pthread_cond_signal(&manager_cond);
-    // destructors should be called after all readers & writers of RefCountTreap have finished
-    while (ongoing.load() > 0)
-      usleep(50*1000);
+    while (pending > 0)
+      pthread_cond_wait(&pending_empty, &mutex);
+    pthread_mutex_unlock(&mutex);
     for (auto x: loaded.roots)
       if (x)
         x->unref();
