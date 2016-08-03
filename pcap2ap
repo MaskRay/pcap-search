@@ -86,11 +86,15 @@ coproc semaphore
 main() {
   log_status processing $@
 
-  for dir in $@; do
-    for i in $dir/*$pcap_suffix; do
+  if [[ -n $opt_recursive ]]; then
+    for i in $@/**/*$pcap_suffix; do
       [[ -e $i$ap_suffix && ! -z $i$ap_suffix ]] || add_data $i
     done
-  done
+  else
+    for i in $@/*$pcap_suffix; do
+      [[ -e $i$ap_suffix && ! -z $i$ap_suffix ]] || add_data $i
+    done
+  fi
 
   log_status start inotify
 
