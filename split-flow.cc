@@ -344,7 +344,6 @@ void split(void* pcap_mmap, off_t pcap_size, FILE* fh)
         offset += tcp->doff*4;
         auto* payload = (u8*)pcap_mmap+offset;
         off_t len = ntohs(ip->tot_len)-ip->ihl*4-tcp->doff*4;
-        printf("-- %ld\n", len);
         FlowKey key{ntohl(ip->saddr), ntohl(ip->daddr), ntohs(tcp->source), ntohs(tcp->dest)},
                 key2{ntohl(ip->daddr), ntohl(ip->saddr), ntohs(tcp->dest), ntohs(tcp->source)};
         if (tcp->th_flags == TH_SYN) { // TODO new connection
@@ -357,8 +356,7 @@ void split(void* pcap_mmap, off_t pcap_size, FILE* fh)
           flow.back().unix_time = frame.timestamp;
           flow.back().packets.push_back(FlowPacket{offset, len, false});
           flow.back().len = len;
-        }
-        else if (tcp->th_flags == (TH_SYN | TH_ACK)) { // TODO new connection
+        } else if (tcp->th_flags == (TH_SYN | TH_ACK)) { // TODO new connection
           if (tuple2flow.count(key2)) {
             auto& v = flow[tuple2flow[key2]];
             v.server_seq = ntohl(tcp->seq)+len;
@@ -480,7 +478,6 @@ rebuild:
     log_action("created flows of %s. data: %ld, index: %ld, used %.3lf s", pcap_path->c_str(), pcap_size, ap_size, sw.elapsed());
   }
 load:
-  printf("load %d\n", errno);
   {
     if (ap_mmap != MAP_FAILED) {
       munmap(ap_mmap, ap_size);
@@ -502,10 +499,8 @@ load:
     pthread_mutex_unlock(&mutex);
     log_action("loaded flows of %s", pcap_path->c_str());
   }
-  printf("load %d\n", errno);
   goto success;
 quit:
-  printf("quit %d\n", errno);
   if (fh)
     fclose(fh);
   else if (ap_fd >= 0)
@@ -515,7 +510,6 @@ quit:
   if (pcap_fd >= 0)
     close(pcap_fd);
 success:
-  printf("success %d\n", errno);
   if (errno)
     err_msg("failed to split %s", pcap_path->c_str());
   delete pcap_path;
