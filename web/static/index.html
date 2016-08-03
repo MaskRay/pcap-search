@@ -218,8 +218,10 @@
                     <div class="ui button" onclick={open.bind(this, parent) }>View</div>
                   </div>
                   <div class="middle aligned content">
-                    <span class="line-number">{offset}</span><span class="ui label">Server:{port0}</span><span class="ui label">Client:{port1}</span> <span class="ui label">{epoch}</span>
-                    <code class="code"><raw content="{context}" /></code>
+                    <span class="line-number">{offset}</span><span class="ui label">Sever:{port0}</span><span class="ui label">Client:{port1}</span> <span class="ui label">{epoch}</span>
+                    <div>
+                      <code class="code"><span class={keyword: i[0] == 1, left: i[0] == 2, right: i[0] == 3} each={i,j in find(context)}>{i[1]}</span></code>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -429,10 +431,6 @@
         }
       }
     </search_bar>
-    <raw>
-      <span></span>
-      this.root.innerHTML = opts.content
-    </raw>
   </script>
 </head>
 <body class="none">

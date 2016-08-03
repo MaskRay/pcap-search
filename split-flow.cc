@@ -74,10 +74,10 @@ struct FlowKey {
 };
 
 struct FlowPacket {
-  off_t offset, len;
+  off_t pcap_offset, pcap_payload_offset, ap_offset, len;
   bool from_server;
   bool operator<(const FlowPacket& o) const {
-    if (offset != o.offset) return offset < o.offset;
+    if (pcap_offset != o.pcap_offset) return pcap_offset < o.pcap_offset;
     return from_server < o.from_server;
   }
 } __attribute__((packed));
@@ -117,6 +117,22 @@ void print_help(FILE *fh)
         "Examples:\n"
         , fh);
   exit(fh == stdout ? 0 : EX_USAGE);
+}
+
+ssize_t write_all(int fd, const void* buf, size_t count)
+{
+  auto* a = (const u8*)buf;
+  ssize_t r;
+  while (count > 0) {
+    r = write(fd, buf, count);
+    if (r < 0) {
+      if (errno == EINTR) continue;
+      return -1;
+    }
+    a += r;
+    count -= r;
+  }
+  return count;
 }
 
 string escape(u8* a, off_t len)
@@ -214,6 +230,7 @@ public:
   vector<Frame> frames;
 
   virtual ~PCAP() {}
+  virtual off_t ether() const { return 16; }
 
   virtual bool parse(void* a_, off_t len) {
     frames.clear();
@@ -226,7 +243,7 @@ public:
       if (j < i+16) return false;
       Frame frame;
       frame.timestamp = *(u32*)&block[0] + double(*(u32*)&block[4]) * 1e-6;
-      frame.offset = i+16;
+      frame.offset = i;
       frames.push_back(frame);
     }
     return true;
@@ -241,6 +258,7 @@ class PCAPNG : public PCAP
 {
 public:
   double tsresol = 1e-6;
+  off_t ether() const override { return 28; }
 
   bool parse_interface_description_block(u32 len, const u8 *block) {
     if (len < 4) return false;
@@ -294,7 +312,7 @@ public:
         Frame frame;
         u64 timestamp = u64(*(u32*)&block[12]) << 32 | *(u32*)&block[16];
         frame.timestamp = timestamp * tsresol;
-        frame.offset = i+28;
+        frame.offset = i;
         frames.push_back(frame);
         break;
       }
@@ -322,7 +340,7 @@ void split(void* pcap_mmap, off_t pcap_size, FILE* fh)
   map<FlowKey, long> tuple2flow;
   REP(i, pcap->frames.size()) {
     auto& frame = pcap->frames[i];
-    off_t offset = frame.offset;
+    off_t offset = frame.offset+pcap->ether();
     if (sizeof(ether_header) > pcap_size-offset)
       return;
     auto* ether = (ether_header*)((u8*)pcap_mmap+offset);
@@ -354,13 +372,13 @@ void split(void* pcap_mmap, off_t pcap_size, FILE* fh)
           flow.back().key = key;
           flow.back().client_seq = ntohl(tcp->seq)+len;
           flow.back().unix_time = frame.timestamp;
-          flow.back().packets.push_back(FlowPacket{offset, len, false});
+          flow.back().packets.push_back(FlowPacket{frame.offset, offset, -1, len, false});
           flow.back().len = len;
         } else if (tcp->th_flags == (TH_SYN | TH_ACK)) { // TODO new connection
           if (tuple2flow.count(key2)) {
             auto& v = flow[tuple2flow[key2]];
             v.server_seq = ntohl(tcp->seq)+len;
-            v.packets.push_back(FlowPacket{offset, len, false});
+            v.packets.push_back(FlowPacket{frame.offset, offset, -1, len, false});
             v.len += len;
           } else {
             tuple2flow.erase(key);
@@ -369,12 +387,12 @@ void split(void* pcap_mmap, off_t pcap_size, FILE* fh)
         } else if (tuple2flow.count(key)) { // TODO reincarnation retransmit
           auto& v = flow[tuple2flow[key]];
           v.client_seq = ntohl(tcp->seq)+len;
-          v.packets.push_back(FlowPacket{offset, len, false});
+          v.packets.push_back(FlowPacket{frame.offset, offset, -1, len, false});
           v.len += len;
         } else if (tuple2flow.count(key2)) { // TODO reincarnation
           auto& v = flow[tuple2flow[key2]];
           v.server_seq = ntohl(tcp->seq)+len;
-          v.packets.push_back(FlowPacket{offset, len, true});
+          v.packets.push_back(FlowPacket{frame.offset, offset, -1, len, true});
           v.len += len;
         }
       }
@@ -411,13 +429,13 @@ void split(void* pcap_mmap, off_t pcap_size, FILE* fh)
         err_exit(EX_OSERR, "fwrite");
       offset += sizeof(FlowHeader) + sizeof(FlowPacket)*f.packets.size();
       for (auto& p: f.packets) {
-        FlowPacket t{offset, p.len, p.from_server};
-        if (fwrite(&t, sizeof t, 1, fh) != 1)
+        p.ap_offset = offset;
+        if (fwrite(&p, sizeof p, 1, fh) != 1)
           err_exit(EX_OSERR, "fwrite");
         offset += p.len;
       }
       for (auto& p: f.packets)
-        if (p.len > 0 && fwrite((u8*)pcap_mmap+p.offset, p.len, 1, fh) != 1)
+        if (p.len > 0 && fwrite((u8*)pcap_mmap+p.pcap_payload_offset, p.len, 1, fh) != 1)
           err_exit(EX_OSERR, "fwrite");
     }
   }
@@ -455,10 +473,8 @@ void* splitter(void* pcap_path_)
       log_status("ap file %s: bad magic, rebuilding", ap_path.c_str());
     else if (ap_hdr->pcap_size != pcap_size)
       log_status("ap file %s: mismatching length of pcap file, rebuilding", ap_path.c_str());
-    else if (! opt_force_rebuild) {
-      printf("force rebuild %d\n", errno);
+    else if (! opt_force_rebuild)
       goto load;
-    }
   }
 rebuild:
   if (loaded.find(*pcap_path)) {
@@ -611,7 +627,7 @@ void process_inotify()
     }
 }
 
-void locate(int connfd, const Entry* entry, off_t offset, off_t len)
+void locate(int connfd, const char* cmd, const Entry* entry, off_t offset, off_t len)
 {
   auto* ap_hdr = (ApHeader*)entry->ap_mmap;
   if (! ap_hdr || offset < 0 || entry->ap_size <= offset) return;
@@ -620,61 +636,74 @@ void locate(int connfd, const Entry* entry, off_t offset, off_t len)
   flow_offset--;
   auto* flow_hdr = (FlowHeader*)((u8*)entry->ap_mmap+*flow_offset);
   long pi = upper_bound(flow_hdr->packets, flow_hdr->packets+flow_hdr->n_packets, FlowPacket{offset, LONG_MAX, true}) - flow_hdr->packets;
-  if (pi == flow_hdr->n_packets) return;
+  if (! pi) return;
   pi--;
-  string left, body, right;
-  long nleft = 0, nbody = 0, nright = 0, epoch = 0, sport = 0, dport = 0;
-  {
-    off_t po = offset-flow_hdr->packets[pi].offset;
-    auto i = pi;
-    for (; i < flow_hdr->n_packets && nbody < len; i++, po = 0) {
-      auto t = min(flow_hdr->packets[i].len-po, len-nbody);
-      if (! t) continue;
-      if (flow_hdr->packets[i].from_server)
-        body += "<span class=\"red highlight\">";
-      else
-        body += "<span class=\"green highlight\">";
-      body += escape((u8*)entry->ap_mmap+flow_hdr->packets[i].offset+po, t);
-      body += "</span>";
-      po += t;
-      if ((nbody += t) == len) break;
-    }
-    for (; i < flow_hdr->n_packets && nright < right_context; i++, po = 0) {
-      auto t = min(flow_hdr->packets[i].len-po, right_context-nright);
-      if (! t) continue;
-      if (flow_hdr->packets[i].from_server)
-        right += "<span class=\"red\">";
-      else
-        right += "<span class=\"green\">";
-      right += escape((u8*)entry->ap_mmap+flow_hdr->packets[i].offset+po, t);
-      right += "</span>";
-    }
-    po = offset-flow_hdr->packets[pi].offset;
-    vector<string> lefts;
-    for (i = pi; nleft < left_context; ) {
-      auto t = min(po, left_context-nleft);
-      if (t) {
-        lefts.emplace_back("</span>");
-        lefts.emplace_back(escape((u8*)entry->ap_mmap+flow_hdr->packets[i].offset+po-t, t));
+
+  if (! strcmp(cmd, "context")) {
+    string left, body, right;
+    long nleft = 0, nbody = 0, nright = 0, epoch = 0, sport = 0, dport = 0;
+    {
+      off_t po = offset-flow_hdr->packets[pi].ap_offset;
+      auto i = pi;
+      for (; i < flow_hdr->n_packets && nbody < len; i++, po = 0) {
+        auto t = min(flow_hdr->packets[i].len-po, len-nbody);
+        if (! t) continue;
         if (flow_hdr->packets[i].from_server)
-          lefts.emplace_back("<span class=\"red\">");
+          body += "<span class=\"red highlight\">";
         else
-          lefts.emplace_back("<span class=\"green\">");
+          body += "<span class=\"green highlight\">";
+        body += escape((u8*)entry->ap_mmap+flow_hdr->packets[i].ap_offset+po, t);
+        body += "</span>";
+        po += t;
+        if ((nbody += t) == len) break;
       }
-      if (! i) break;
-      po = flow_hdr->packets[--i].len;
+      for (; i < flow_hdr->n_packets && nright < right_context; i++, po = 0) {
+        auto t = min(flow_hdr->packets[i].len-po, right_context-nright);
+        if (! t) continue;
+        if (flow_hdr->packets[i].from_server)
+          right += "<span class=\"red\">";
+        else
+          right += "<span class=\"green\">";
+        right += escape((u8*)entry->ap_mmap+flow_hdr->packets[i].ap_offset+po, t);
+        right += "</span>";
+      }
+      po = offset-flow_hdr->packets[pi].ap_offset;
+      vector<string> lefts;
+      for (i = pi; nleft < left_context; ) {
+        auto t = min(po, left_context-nleft);
+        if (t) {
+          lefts.emplace_back("</span>");
+          lefts.emplace_back(escape((u8*)entry->ap_mmap+flow_hdr->packets[i].ap_offset+po-t, t));
+          if (flow_hdr->packets[i].from_server)
+            lefts.emplace_back("<span class=\"red\">");
+          else
+            lefts.emplace_back("<span class=\"green\">");
+        }
+        if (! i) break;
+        po = flow_hdr->packets[--i].len;
+      }
+      for (auto it = lefts.rbegin(); it != lefts.rend(); ++it)
+        left += *it;
     }
-    for (auto it = lefts.rbegin(); it != lefts.rend(); ++it)
-      left += *it;
+    dprintf(connfd, "%" PRIu32 "\t%" PRIu16 "\t%" PRIu16 "\t%s", flow_hdr->unix_time, flow_hdr->key.client_port, flow_hdr->key.server_port, (left+body+right).c_str());
+  } else if (! strcmp(cmd, "pcap")) {
+    const char global_header[] = "\xd4\xc3\xb2\xa1\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\x00\x00\x01\x00\x00\x00";
+    write_all(connfd, global_header, sizeof(global_header)-1);
+    off_t po = offset-flow_hdr->packets[pi].ap_offset;
+    REP(i, flow_hdr->n_packets) {
+      // TODO PCAPNG
+      auto* block = (u8*)entry->pcap_mmap+flow_hdr->packets[i].pcap_offset;
+      u64 timestamp = (u64(*(u32*)&block[12]) << 32 | *(u32*)&block[16]) * tsresol;
+      write_all(connfd, block, *(u32*)(block+4));
+    }
   }
-  dprintf(connfd, "%" PRIu32 "\t%" PRIu16 "\t%" PRIu16 "\t%s", flow_hdr->unix_time, flow_hdr->key.client_port, flow_hdr->key.server_port, (left+body+right).c_str());
 }
 
 void* request_worker(void* connfd_)
 {
   int connfd = intptr_t(connfd_);
   char buf[BUF_SIZE] = {};
-  const char *p, *pos;
+  const char *p, *filename, *pos;
   int nread = 0;
   timespec timeout;
   {
@@ -701,6 +730,9 @@ void* request_worker(void* connfd_)
 
   for (p = buf; p < buf+nread && *p; p++);
   if (++p >= buf+nread) goto quit;
+  filename = p;
+  for (; p < buf+nread && *p; p++);
+  if (++p >= buf+nread) goto quit;
   pos = p;
   for (; p < buf+nread && *p; p++);
   if (++p >= buf+nread) goto quit;
@@ -712,11 +744,11 @@ void* request_worker(void* connfd_)
       ulong len = strtoul(p, &end, 0);
       if (! *end && ! errno) {
         pthread_mutex_lock(&mutex);
-        auto* node = loaded.find(string(buf));
+        auto* node = loaded.find(string(filename));
         if (node) node->refcnt++;
         pthread_mutex_unlock(&mutex);
         if (node) {
-          locate(connfd, node->val.get(), offset, len);
+          locate(connfd, buf, node->val.get(), offset, len);
           pthread_mutex_lock(&mutex);
           node->unref();
           pthread_mutex_unlock(&mutex);

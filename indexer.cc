@@ -95,7 +95,7 @@ string unescape(size_t n, const char *str)
         i += 4;
         continue;
       }
-      if (i+1 < n)
+      if (i+1 <= n)
         switch (str[i+1]) {
         case 'a': ret += '\a'; i += 2; continue;
         case 'b': ret += '\b'; i += 2; continue;
