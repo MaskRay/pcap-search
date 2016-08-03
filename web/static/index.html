@@ -219,10 +219,7 @@
                   </div>
                   <div class="middle aligned content">
                     <span class="line-number">{offset}</span><span class="ui label">Server:{port0}</span><span class="ui label">Client:{port1}</span> <span class="ui label">{epoch}</span>
-                    <my-tag>
-                      <code class="code">{context}</code>
-                      this.context = 'aaaaaaaa'
-                    </my-tag>
+                    <code class="code"><raw content="context" /></code>
                   </div>
                 </div>
               </div>
@@ -432,11 +429,14 @@
         }
       }
     </search_bar>
+    <raw>
+      <span></span>
+      this.root.innerHTML = opts.content
+    <raw>
   </script>
 </head>
 <body class="none">
   <search_bar></search_bar>
-  <my-tag></my-tag>
   <script>
   tags = riot.mount("*");
   </script>
