@@ -43,3 +43,28 @@ web/web.rb
 ```
 
 [Dshell]: https://github.com/USArmyResearchLab/Dshell
+
+
+
+int32: number of sessions
+
+struct {
+  i32 n_sessions;
+  Session sessions[];
+};
+
+struct Session {
+  i32 n_packets;
+  i32 server_ip;
+  i32 server_port;
+  i32 client_ip;
+  i32 client_port;
+  i32 first_timestamp;
+  i32 last_timestamp;
+  Packet packets[];
+};
+
+struct Packet {
+  bool from_server;
+  i32 len;
+};

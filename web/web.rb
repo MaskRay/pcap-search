@@ -18,11 +18,11 @@ rescue LoadError => e
 end
 
 SEARCH_SOCK = '/tmp/search.sock'
+FLOW_SOCK = '/tmp/flow.sock'
 SEARCH_TIMEOUT = 30
 MAX_PAGES = 30
 PER_PAGE = 20
-DSHELL_DEFCON = File.join __dir__, '..', 'dshell-defcon'
-PCAP_DIR = File.expand_path '/home/ray/defcon23'
+PCAP_DIR = File.expand_path '/tmp/pcap'
 
 # Main
 
@@ -37,10 +37,6 @@ set :bind, '0'
 set :port, 4568
 
 set :views, sass: 'css', coffee: 'js', :default => 'html'
-
-def offset2stream filepath, offset, type, out, &block
-  IO.popen([File.join(DSHELL_DEFCON, 'offset2stream.py'), "#{filepath}.ap", offset.to_s, type, filepath, out], &block)
-end
 
 helpers do
   def find_template(views, name, engine, &block)
@@ -140,42 +136,31 @@ get '/api/search' do
   res = ''
   total = 0
 
-  qq = q.gsub(/\\[0-7]{1,3}/) {|match|
-    "\\x#{'%02x' % match[1..-1].to_i(8)}"
-  }
-  .gsub('\\\\', '\\x5c')
-  .gsub('\\a', '\\x07')
-  .gsub('\\b', '\\x08')
-  .gsub('\\t', '\\x09')
-  .gsub('\\n', '\\x0a')
-  .gsub('\\v', '\\x0b')
-  .gsub('\\f', '\\x0c')
-  .gsub('\\r', '\\x0d')
-
   begin
     Timeout.timeout SEARCH_TIMEOUT do
       sock = Socket.new Socket::AF_UNIX, Socket::SOCK_STREAM, 0
       sock.connect Socket.pack_sockaddr_un(SEARCH_SOCK)
-      sock.write "#{offset}\0#{File.join PCAP_DIR, service, "\x01"}\0#{File.join PCAP_DIR, service, "\x7f"}\0#{qq}"
+      sock.write "#{offset}\0#{File.join PCAP_DIR, service, "\x01"}\0#{File.join PCAP_DIR, service, "\x7f"}\0#{q}"
       sock.close_write
       lines = sock.read.lines
       sock.close
       total = [lines[-1].to_i, PER_PAGE*MAX_PAGES].min
 
       res = []
-      IO.popen [File.join(DSHELL_DEFCON, 'context.py')], 'r+' do |h|
-        lines[0...-1].each {|line|
-          filepath, offset, len = line.chomp.split "\t"
-          h.puts "#{filepath}\t#{offset}\t#{len}"
-          h.flush
-          line = h.readline
-          _, offset, epoch, port0, port1, context = line.chomp.split "\t"
-          epoch = epoch.to_i
-          if epoch >= 0 && context && ! context.empty?
-            res << {filename: filepath.sub(/.*\/(.*)\.ap$/, '\1'), offset: offset.to_i, epoch: epoch, port0: port0.to_i, port1: port1.to_i, context: context}
-          end
-        }
-      end
+      lines[0...-1].each {|line|
+        filepath, offset, len = line.chomp.split "\t"
+        begin
+          sock2 = Socket.new Socket::AF_UNIX, Socket::SOCK_STREAM, 0
+          sock2.connect Socket.pack_sockaddr_un(FLOW_SOCK)
+          sock2.write "#{filepath}\0#{offset}\0#{len}"
+          sock2.close_write
+          epoch, client_port, server_port, context = sock2.read.split "\t"
+          res << {filename: filepath.sub(/.*\/(.*)\.ap$/, '\1'), offset: offset.to_i, epoch: epoch.to_i, port0: server_port.to_i, port1: client_port.to_i, context: context}
+        rescue
+        end
+      }
+      #puts "++ res"
+      #puts lines, res
 
       res_grouped = Hash.new {|h,k| h[k] = [] }
       res.each {|x|
@@ -184,7 +169,7 @@ get '/api/search' do
       }
 
       res = {
-        query: qq,
+        query: q,
         results: res_grouped
       }.to_json
     end

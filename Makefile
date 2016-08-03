@@ -1,8 +1,7 @@
 CXXFLAGS += -g3 -march=native -std=c++11 -Wno-deprecated-declarations -pthread
 
-all: indexer indexer32
+all: indexer indexer32 split-flow
 
-indexer: indexer.cc
 indexer32: indexer.cc
 	$(LINK.cc) -m32 $^ -o $@
 

@@ -218,10 +218,11 @@
                     <div class="ui button" onclick={open.bind(this, parent) }>View</div>
                   </div>
                   <div class="middle aligned content">
-                    <span class="line-number">{offset}</span><span class="ui label">Sever:{port0}</span><span class="ui label">Client:{port1}</span> <span class="ui label">{epoch}</span>
-                    <div>
-                      <code class="code"><span class={keyword: i[0] == 1, left: i[0] == 2, right: i[0] == 3} each={i,j in find(context)}>{i[1]}</span></code>
-                    </div>
+                    <span class="line-number">{offset}</span><span class="ui label">Server:{port0}</span><span class="ui label">Client:{port1}</span> <span class="ui label">{epoch}</span>
+                    <my-tag>
+                      <code class="code">{context}</code>
+                      this.context = 'aaaaaaaa'
+                    </my-tag>
                   </div>
                 </div>
               </div>
@@ -435,6 +436,7 @@
 </head>
 <body class="none">
   <search_bar></search_bar>
+  <my-tag></my-tag>
   <script>
   tags = riot.mount("*");
   </script>
