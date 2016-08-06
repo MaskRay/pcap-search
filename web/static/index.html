@@ -63,7 +63,7 @@
     font-width: bold;
     color: red;
   }
-  code.hex, code.repr, code.str, code.python{
+  code.hex, code.repr, code.str, code.c, code.python{
     overflow-x: scroll;
     white-space: pre-wrap;
     break-word: break-all;
@@ -161,6 +161,7 @@
               <a class="active item" data-tab="hex">Hex</a>
               <a class="item" data-tab="repr">repr</a>
               <a class="item" data-tab="str">String</a>
+              <a class="item" data-tab="c">C</a>
               <a class="item" data-tab="python_simple">Python Simple</a>
               <a class="item" data-tab="python_diff">Python Diff</a>
             </div>
@@ -177,6 +178,11 @@
             <div class="ui bottom attached tab segment" data-tab="str">
               <code class="str">
                 <div each={i,j in str}>{i}</div>
+              </code>
+            </div>
+            <div class="ui bottom attached tab segment" data-tab="c">
+              <code class="c">
+                  <div>{c}</div>
               </code>
             </div>
             <div class="ui bottom attached tab segment" data-tab="python_simple">
@@ -331,6 +337,10 @@
         }.bind(this), 'text')
         $.get(this.download(file, offset, 'str'), {}, function(response){
           this.str = response.split("--------------------------------------------\n")
+          this.update()
+        }.bind(this), 'text')
+        $.get(this.download(file, offset, 'c'), {}, function(response){
+          this.c = response
           this.update()
         }.bind(this), 'text')
         $.get(this.download(file, offset, 'pythonsimple'), {}, function(response){

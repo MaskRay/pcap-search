@@ -90,6 +90,28 @@ def out_str(srcip, srcport, destip, dstport, data, direction, ff):
 
 
 
+def out_begin_c(*args):
+    global _out_file, ix
+    _out_file = open(sys.argv[5], 'wb')
+    ix = [0, 0]
+
+def out_c(srcip, srcport, destip, dstport, data, direction, ff):
+    payload = ''
+    for c in data:
+        if 32 <= ord(c) < 127 and c not in '&<>\\"':
+            payload += c
+        else:
+            payload += '\\x%0*x' % (2, ord(c))
+    side = 1 if direction == 'sc' else 0
+    print >>_out_file, 'const char payload_{}_{}[] = "'.format('client' if side == 0 else 'server', ix[side], payload)+payload+'";'
+    ix[side] += 1
+
+def out_end_c(*args):
+    if _out_file != sys.stdout:
+        _out_file.close()
+
+
+
 def out_begin_pythonsimple(*args):
     global _out_file
     _out_file = open(sys.argv[5], 'wb')
@@ -140,7 +162,7 @@ def attack(host, port):
 if __name__ == '__main__':
     if len(sys.argv) == 1:
         print '-' * 50, ' BEGIN NETWORK FLOW ', '-' * 50
-        for c, s in seq: 
+        for c, s in seq:
             print c == 0 and '[ Server ]:' or '[ Client ]:', colored(repr(s), colors[c])
         print '-' * 50, ' END NETWORK FLOW ', '-' * 50
         print 'usage: \n    %s <host> <port>' % sys.argv[0]

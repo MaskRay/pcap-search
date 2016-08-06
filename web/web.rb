@@ -72,7 +72,7 @@ get '/download' do
     content_type 'application/vnd.tcpdump.pcap'
     attachment filename
     send_file File.join(PCAP_DIR, service, filename)
-  when 'pcap', 'str', 'hex', 'repr', 'pythonsimple', 'pythondiff'
+  when 'pcap', 'str', 'hex', 'repr', 'c', 'pythonsimple', 'pythondiff'
     return 412 unless offset
     if type == 'pcap'
       content_type 'application/vnd.tcpdump.pcap'
