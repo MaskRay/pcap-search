@@ -28,10 +28,10 @@ log_generic() {
   fmt=$1
   print -- "$(date +%T.%N) $fmt" "${@:2}"
 }
-log_error() { tput setaf 1; log_generic "$@"; tput sgr0 }
-log_action() { tput setaf 2; log_generic "$@"; tput sgr0 }
-log_status() { tput setaf 3; log_generic "$@"; tput sgr0 }
-log_event() { tput setaf 6; log_generic "$@"; tput sgr0 }
+log_error() { tty -s && tput setaf 1; log_generic "$@"; tty -s && tput sgr0 }
+log_action() { tty -s && tput setaf 2; log_generic "$@"; tty -s && tput sgr0 }
+log_status() { tty -s && tput setaf 3; log_generic "$@"; tty -s && tput sgr0 }
+log_event() { tty -s && tput setaf 6; log_generic "$@"; tty -s && tput sgr0 }
 
 declare -A modified
 add() { modified[$1]=1 }
