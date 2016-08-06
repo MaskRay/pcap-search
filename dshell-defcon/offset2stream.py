@@ -146,7 +146,7 @@ except:
     print >>_out_file, '# 1 for client, 0 for server'
 
 
-def out_end_pythonsimple():
+def out_end_pythonsimple(*args):
     print >>_out_file, "colors = ['yellow', 'cyan']"
     print >>_out_file, r"""
 def attack(host, port):
