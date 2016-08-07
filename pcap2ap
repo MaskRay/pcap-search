@@ -126,7 +126,7 @@ main() {
         rm_data $filepath
       fi
     elif [[ $event =~ MODIFY ]]; then
-      log_event MODIFY $filepath
+      #log_event MODIFY $filepath
       if [[ $filename =~ "\\$pcap_suffix\$" ]]; then
         add $filepath
       fi

@@ -117,8 +117,11 @@ get '/api/autocomplete' do
         filepath = filepath.sub(/\.ap$/, '')
         offset = offset.to_i
         offset2stream filepath, offset, 'loc', '/dev/stdout' do |h|
-          _, y = h.read.split.map(&:to_i)
-          sug << context.scan(/(?:\\x(?:..)|[^\\]){,#{[y-offset,context.size].min}}/)[0] if offset < y
+          body = h.read
+          if ! body.empty?
+            _, y = body.split.map(&:to_i)
+            sug << context.scan(/(?:\\x(?:..)|[^\\]){,#{[y-offset,context.size].min}}/)[0] if offset < y
+          end
         end
       }
       res = {query: q, suggestions: sug.uniq }.to_json
