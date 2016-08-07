@@ -97,13 +97,18 @@ def out_begin_c(*args):
 
 def out_c(srcip, srcport, destip, dstport, data, direction, ff):
     payload = ''
+    last = False
     for c in data:
         if 32 <= ord(c) < 127 and c not in '&<>\\"':
+            if last:
+                payload += '""'
             payload += c
+            last = False
         else:
             payload += '\\x%0*x' % (2, ord(c))
+            last = True
     side = 1 if direction == 'sc' else 0
-    print >>_out_file, 'const char payload_{}_{}[] = "'.format('client' if side == 0 else 'server', ix[side], payload)+payload+'";'
+    print >>_out_file, 'const unsigned char payload_{}_{}[] = "'.format('client' if side == 0 else 'server', ix[side], payload)+payload+'";'
     ix[side] += 1
 
 def out_end_c(*args):
