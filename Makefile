@@ -1,17 +1,8 @@
 CXXFLAGS += -g3 -march=native -std=c++11 -Wno-deprecated-declarations -pthread
 
-all: indexer indexer32 split-flow
+all: indexer
 
-indexer32: indexer.cc
-	$(LINK.cc) -m32 $^ -o $@
+clean:
+	$(RM) indexer
 
-debug: indexer
-debug: CXXFLAGS += -fno-inline-functions -fkeep-inline-functions
-
-asan: debug
-asan: CXXFLAGS += -fsanitize=address
-
-opt: indexer
-opt: CXXFLAGS += -O3
-
-.PHONY: debug asan opt
+.PHONY: all clean
